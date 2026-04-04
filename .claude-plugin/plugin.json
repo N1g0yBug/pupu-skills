@@ -1,0 +1,22 @@
+{
+  "name": "pupu-skills",
+  "version": "1.0.0",
+  "description": "Claude Code 技能记忆插件 — Markdown 技能库 + LLM 路由 + 效用评分，让 Claude 拥有持久化技能记忆",
+  "author": {
+    "name": "pupu-skills"
+  },
+  "repository": "https://github.com/YOUR_USERNAME/pupu-skills",
+  "homepage": "https://github.com/YOUR_USERNAME/pupu-skills",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "skills",
+    "markdown",
+    "skill-memory",
+    "llm-router",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

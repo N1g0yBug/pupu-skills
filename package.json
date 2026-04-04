@@ -1,0 +1,49 @@
+{
+  "name": "pupu-skills",
+  "version": "1.0.0",
+  "description": "Claude Code 技能记忆插件 — Markdown 技能库 + LLM 路由 + 效用评分，让 Claude 拥有持久化技能记忆",
+  "type": "module",
+  "bin": {
+    "pupu": "./bin/pupu.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "tsx src/test/e2e.mts"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    ".claude-plugin/",
+    ".mcp.json",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "skills",
+    "markdown",
+    "skill-memory",
+    "llm-router",
+    "mcp",
+    "pupu"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+pupu-test-*
+pupu-dbg-*
+tsc-out.txt
+.sisyphus/
+skills_repo/

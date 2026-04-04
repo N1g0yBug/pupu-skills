@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pupu-skills": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/pupu.js", "start"]
+    }
+  }
+}
