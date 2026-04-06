@@ -4,8 +4,9 @@
 
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { createInitializedStore } from "./bootstrap.js";
 import { startMcpServer } from "./index.js";
-import { SkillStore, type ExecutionRecord } from "./memory/store.js";
+import type { ExecutionRecord } from "./memory/store.js";
 
 type CliArgs = string[];
 
@@ -65,7 +66,7 @@ async function confirmDelete(name: string): Promise<boolean> {
 }
 
 async function handleList(): Promise<void> {
-  const store = await SkillStore.create();
+  const store = await createInitializedStore();
   const skills = store.list();
 
   if (skills.length === 0) {
@@ -85,7 +86,7 @@ async function handleList(): Promise<void> {
 }
 
 async function handleShow(name: string): Promise<void> {
-  const store = await SkillStore.create();
+  const store = await createInitializedStore();
   const skill = store.get(name);
   if (!skill) {
     output.write(`技能不存在: ${name}\n`);
@@ -98,7 +99,7 @@ async function handleShow(name: string): Promise<void> {
 }
 
 async function handleHistory(name: string): Promise<void> {
-  const store = await SkillStore.create();
+  const store = await createInitializedStore();
   const skill = store.get(name);
   if (!skill) {
     output.write(`技能不存在: ${name}\n`);
@@ -119,7 +120,7 @@ async function handleHistory(name: string): Promise<void> {
 }
 
 async function handleDelete(name: string): Promise<void> {
-  const store = await SkillStore.create();
+  const store = await createInitializedStore();
   const skill = store.get(name);
   if (!skill) {
     output.write(`技能不存在: ${name}\n`);

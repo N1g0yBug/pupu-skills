@@ -5,9 +5,10 @@
  *
  * Usage:
  *   pupu start          Start the MCP server on stdio (for Claude Code)
- *   pupu start --sse    Start the MCP server with SSE transport
  *   pupu list           List all registered skills
- *   pupu run <name>     Execute a skill directly from the terminal
+ *   pupu show <name>    Show a skill's markdown content
+ *   pupu history <name> Show recent execution history
+ *   pupu delete <name>  Delete a user skill
  */
 
 import { runCli } from "../dist/cli.js";

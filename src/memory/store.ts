@@ -313,7 +313,6 @@ export class SkillStore {
     }
 
     const store = new SkillStore(storePath, repoDir, data);
-    await store.flush();
     return store;
   }
 
@@ -458,40 +457,48 @@ export class SkillStore {
   }
 
   async registerBuiltin(skill: BuiltinInput | BuiltinLegacyInput): Promise<void> {
-    const existing = this.data.skills[skill.name];
-    if (existing) {
-      if (!existing.builtin) {
-        return;
-      }
-      return;
-    }
-
     const now = new Date().toISOString();
     const filePath = resolve(this.repoDir, `${skill.name}.md`);
     const content = "content" in skill ? skill.content : skill.code;
+    const existing = this.data.skills[skill.name];
 
-    const record: SkillRecord = {
-      name: skill.name,
-      description: skill.description,
-      filePath,
-      builtin: true,
-      triggers: skill.triggers ?? [],
-      createdAt: now,
-      updatedAt: now,
-      executionCount: 0,
-      successCount: 0,
-      lastError: null,
-      utilityScore: 50,
-      history: [],
-      calls: skill.calls ?? [],
-    };
+    if (existing && !existing.builtin) {
+      return;
+    }
+
+    const record: SkillRecord = existing?.builtin
+      ? {
+          ...existing,
+          name: skill.name,
+          description: skill.description,
+          filePath,
+          builtin: true,
+          triggers: skill.triggers ?? existing.triggers,
+          updatedAt: now,
+          calls: skill.calls ?? existing.calls,
+        }
+      : {
+          name: skill.name,
+          description: skill.description,
+          filePath,
+          builtin: true,
+          triggers: skill.triggers ?? [],
+          createdAt: now,
+          updatedAt: now,
+          executionCount: 0,
+          successCount: 0,
+          lastError: null,
+          utilityScore: 50,
+          history: [],
+          calls: skill.calls ?? [],
+        };
 
     record.utilityScore = computeUtilityScore(record);
     await writeFile(filePath, `${buildFrontmatter(record)}\n${content}`, "utf-8");
 
     this.data.skills[skill.name] = record;
     await this.flush();
-    logger.info("已注册内置 markdown 技能", { name: skill.name });
+    logger.info(existing?.builtin ? "已刷新内置 markdown 技能" : "已注册内置 markdown 技能", { name: skill.name });
   }
 
   async readSkillContent(name: string): Promise<string> {

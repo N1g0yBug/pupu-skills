@@ -128,16 +128,22 @@ pupu_route({ task: "帮我处理这个 Excel 表格" })
 每个 tool 响应末尾自动附带技能库摘要：
 
 ```
-📊 技能库: 12 个技能 (9 内置)
-📋 可用: analyze_apk(92分) | xlsx(78分) | filesystem(72分) | ...
-💡 提示: 遇到新任务时，先调用 pupu_route 获取推荐技能
+技能库: 12 个技能 (9 内置)
+可用:
+  - analyze_apk(92分): 逆向分析 Android APK
+  - xlsx(78分): Excel 表格处理
+  - filesystem(72分): 文件读写、搜索、批量处理
+
+重要行为规则（每次都必须遵守）：
+1. 接到任务时，先查看技能库摘要；不确定时调用 pupu_route
+2. 完成任务后，调用 pupu_learn 上报上下文进行被动学习
 ```
 
 Claude 在任何交互后都能看到可用技能，不需要主动搜索。
 
 ---
 
-## 9 个 MCP Tool
+## 10 个 MCP Tool
 
 | Tool | 功能 |
 |---|---|
@@ -150,6 +156,7 @@ Claude 在任何交互后都能看到可用技能，不需要主动搜索。
 | `pupu_delete` | 删除技能 |
 | `pupu_history` | 查看执行历史 |
 | `pupu_route` | **LLM 自主技能路由** — 描述任务，返回推荐技能 |
+| `pupu_learn` | 自动学习，判断是否需要新建或优化技能 |
 
 ---
 
@@ -189,7 +196,7 @@ pupu-skills/
 │   └── skill-creator.md
 ├── bin/pupu.js                  # CLI 入口
 ├── src/
-│   ├── index.ts                 # MCP Server — 9 个 Tool
+│   ├── index.ts                 # MCP Server — 10 个 Tool
 │   ├── cli.ts                   # CLI: start/list/show/history/delete
 │   ├── memory/store.ts          # 技能存储 + 效用评分
 │   ├── router/router.ts         # LLM 技能路由
@@ -221,7 +228,7 @@ pupu-skills/
 ```bash
 npm install
 npm run build        # tsc 编译
-npm test             # 26 个 e2e 测试
+npm test             # 33 个 e2e 测试
 npm run dev          # 开发模式启动 MCP server
 ```
 

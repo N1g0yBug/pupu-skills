@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude --version)",
+      "Bash(git fetch:*)",
+      "Bash(ls src/skills/*.md)",
+      "Bash(diffstat)",
+      "Bash(grep -v \"^[<>]\\\\s*$\")",
+      "Bash(sed 's/^[<>] //')",
+      "Bash(grep -v \"^>\\\\s*$\")",
+      "Bash(grep -v \"^[+-]\\\\s*$\")",
+      "Bash(echo \"exit: $?\")"
+    ]
+  }
+}

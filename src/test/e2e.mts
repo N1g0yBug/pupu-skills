@@ -1,7 +1,12 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createInitializedStore } from "../bootstrap.js";
 import { SkillStore } from "../memory/store.js";
 import { buildSkillSummary, route } from "../router/router.js";
+import { parseSkillFrontmatter } from "../skills/frontmatter.js";
+import { resolveBuiltinSkillsDir } from "../skills/paths.js";
+import { isSafeSkillName } from "../skills/validation.js";
 
 const tests: { name: string; fn: () => Promise<boolean> }[] = [];
 const passed: string[] = [];
@@ -67,7 +72,20 @@ test("创建空 store", async () => {
   return true;
 });
 
-// 2. save + get
+// 2. create 不应急切写入 store 文件
+test("create 不应急切写入 store 文件", async () => {
+  counter++;
+  const storePath = join(tmpDir, `skills_${counter}.json`);
+  await SkillStore.create({
+    storePath,
+    repoDir: join(tmpDir, `repo_${counter}`),
+  });
+
+  assert(!existsSync(storePath), "create 后在首次写入前不应生成 store 文件");
+  return true;
+});
+
+// 3. save + get
 test("save + get", async () => {
   const store = await tmpStore();
   await store.save({
@@ -87,7 +105,7 @@ test("save + get", async () => {
   return true;
 });
 
-// 3. save 写入 markdown 文件
+// 4. save 写入 markdown 文件
 test("save 写入 markdown 文件", async () => {
   const store = await tmpStore();
   await seedSkill(store, "write-md", { content: "# 标题\n\n正文" });
@@ -100,7 +118,7 @@ test("save 写入 markdown 文件", async () => {
   return true;
 });
 
-// 4. readSkillContent
+// 5. readSkillContent
 test("readSkillContent", async () => {
   const store = await tmpStore();
   await seedSkill(store, "read-content", { content: "# A\n\nB" });
@@ -110,7 +128,7 @@ test("readSkillContent", async () => {
   return true;
 });
 
-// 5. updateSkillContent
+// 6. updateSkillContent
 test("updateSkillContent", async () => {
   const store = await tmpStore();
   await seedSkill(store, "update-only-body", { content: "旧正文" });
@@ -130,7 +148,7 @@ test("updateSkillContent", async () => {
   return true;
 });
 
-// 6. search 模糊匹配
+// 7. search 模糊匹配
 test("search 模糊匹配", async () => {
   const store = await tmpStore();
   await seedSkill(store, "git-commit", {
@@ -153,7 +171,7 @@ test("search 模糊匹配", async () => {
   return true;
 });
 
-// 7. search 按 utility score 排序
+// 8. search 按 utility score 排序
 test("search 按 utility score 排序", async () => {
   const store = await tmpStore();
   await seedSkill(store, "same-high", { description: "abc", triggers: ["x"] });
@@ -184,7 +202,7 @@ test("search 按 utility score 排序", async () => {
   return true;
 });
 
-// 8. delete
+// 9. delete
 test("delete", async () => {
   const store = await tmpStore();
   await seedSkill(store, "to-delete", { content: "x" });
@@ -198,7 +216,7 @@ test("delete", async () => {
   return true;
 });
 
-// 9. delete 内置保护
+// 10. delete 内置保护
 test("delete 内置保护", async () => {
   const store = await tmpStore();
   await store.registerBuiltin({
@@ -215,7 +233,7 @@ test("delete 内置保护", async () => {
   return true;
 });
 
-// 10. registerBuiltin 不覆盖用户技能
+// 11. registerBuiltin 不覆盖用户技能
 test("registerBuiltin 不覆盖用户技能", async () => {
   const store = await tmpStore();
   await seedSkill(store, "same-name", {
@@ -240,7 +258,7 @@ test("registerBuiltin 不覆盖用户技能", async () => {
   return true;
 });
 
-// 11. recordExecution 成功
+// 12. recordExecution 成功
 test("recordExecution 成功", async () => {
   const store = await tmpStore();
   await seedSkill(store, "exec-ok");
@@ -260,7 +278,7 @@ test("recordExecution 成功", async () => {
   return true;
 });
 
-// 12. recordExecution 失败
+// 13. recordExecution 失败
 test("recordExecution 失败", async () => {
   const store = await tmpStore();
   await seedSkill(store, "exec-fail");
@@ -280,7 +298,7 @@ test("recordExecution 失败", async () => {
   return true;
 });
 
-// 13. getHistory
+// 14. getHistory
 test("getHistory", async () => {
   const store = await tmpStore();
   await seedSkill(store, "history-n");
@@ -317,7 +335,7 @@ test("getHistory", async () => {
   return true;
 });
 
-// 14. getLastExecution
+// 15. getLastExecution
 test("getLastExecution", async () => {
   const store = await tmpStore();
   await seedSkill(store, "last-one");
@@ -344,7 +362,7 @@ test("getLastExecution", async () => {
   return true;
 });
 
-// 15. history 上限裁剪
+// 16. history 上限裁剪
 test("history 上限裁剪", async () => {
   const store = await tmpStore();
   await seedSkill(store, "history-cap");
@@ -367,7 +385,7 @@ test("history 上限裁剪", async () => {
   return true;
 });
 
-// 16. 效用分计算
+// 17. 效用分计算
 test("效用分计算", async () => {
   const store = await tmpStore();
   await seedSkill(store, "score-up");
@@ -399,7 +417,7 @@ test("效用分计算", async () => {
   return true;
 });
 
-// 17. getLowUtility 基本功能
+// 18. getLowUtility 基本功能
 test("getLowUtility 基本功能", async () => {
   const store = await tmpStore();
   await seedSkill(store, "low-one");
@@ -430,7 +448,7 @@ test("getLowUtility 基本功能", async () => {
   return true;
 });
 
-// 18. getLowUtility 排除未执行
+// 19. getLowUtility 排除未执行
 test("getLowUtility 排除未执行", async () => {
   const store = await tmpStore();
   await seedSkill(store, "never-run");
@@ -453,7 +471,7 @@ test("getLowUtility 排除未执行", async () => {
   return true;
 });
 
-// 19. route 精确匹配
+// 20. route 精确匹配
 test("route 精确匹配", async () => {
   const store = await tmpStore();
   await seedSkill(store, "lint fix", {
@@ -468,7 +486,7 @@ test("route 精确匹配", async () => {
   return true;
 });
 
-// 20. route 触发词匹配
+// 21. route 触发词匹配
 test("route 触发词匹配", async () => {
   const store = await tmpStore();
   await seedSkill(store, "deploy-helper", {
@@ -481,13 +499,36 @@ test("route 触发词匹配", async () => {
   return true;
 });
 
-// 21. route 无匹配
+// 22. route 中文分词匹配
+test("route 中文分词匹配", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "apk-reverse", {
+    description: "逆向分析",
+    triggers: ["逆向 apk"],
+  });
+
+  const result = route("帮我分析这个 APK 的逆向逻辑", store.list());
+  assert(result.recommendations.some(item => item.skill.name === "apk-reverse"), "中文双字切分后应能命中技能");
+  return true;
+});
+
+// 23. route 无匹配
 test("route 无匹配", async () => {
   const store = await tmpStore();
   await seedSkill(store, "only-git", {
     description: "git 相关",
     triggers: ["commit", "rebase"],
   });
+  for (let i = 0; i < 5; i++) {
+    await store.recordExecution("only-git", {
+      timestamp: iso(i),
+      success: true,
+      duration: 1,
+      summary: "ok",
+      error: null,
+      context: "ctx",
+    });
+  }
 
   const result = route("烤蛋糕配方", store.list());
   assert(result.recommendations.length === 0, "无相关任务应无推荐");
@@ -495,10 +536,26 @@ test("route 无匹配", async () => {
   return true;
 });
 
-// 22. buildSkillSummary
+// 24. route 最多返回 8 个候选
+test("route 最多返回 8 个候选", async () => {
+  const store = await tmpStore();
+
+  for (let i = 1; i <= 10; i++) {
+    await seedSkill(store, `deploy-${i}`, {
+      description: `部署工具 ${i}`,
+      triggers: ["deploy"],
+    });
+  }
+
+  const result = route("deploy production", store.list());
+  assert(result.recommendations.length === 8, "候选池应扩展到 8 个");
+  return true;
+});
+
+// 25. buildSkillSummary
 test("buildSkillSummary", async () => {
   const store = await tmpStore();
-  await seedSkill(store, "a-skill");
+  await seedSkill(store, "a-skill", { description: "A 技能描述" });
   await store.registerBuiltin({
     name: "b-skill",
     content: "builtin",
@@ -508,13 +565,15 @@ test("buildSkillSummary", async () => {
   });
 
   const text = buildSkillSummary(store.list());
-  assert(text.includes("📊 技能库: 2 个技能 (1 内置)"), "应包含总数与内置数");
-  assert(text.includes("📋 可用:"), "应包含可用技能列表");
-  assert(text.includes("💡 提示:"), "应包含提示语");
+  assert(text.includes("技能库: 2 个技能 (1 内置)"), "应包含总数与内置数");
+  assert(text.includes("可用:\n"), "应包含可用技能列表");
+  assert(text.includes("a-skill(50分): A 技能描述"), "摘要中应包含技能描述");
+  assert(text.includes("必须调用 pupu_learn"), "应包含自动学习规则");
+  assert(!text.includes("📊"), "摘要中不应包含 emoji");
   return true;
 });
 
-// 23. registerBuiltin 写入文件
+// 26. registerBuiltin 写入文件
 test("registerBuiltin 写入文件", async () => {
   const store = await tmpStore();
   await store.registerBuiltin({
@@ -535,8 +594,8 @@ test("registerBuiltin 写入文件", async () => {
   return true;
 });
 
-// 24. registerBuiltin 重复不覆盖
-test("registerBuiltin 重复不覆盖", async () => {
+// 27. registerBuiltin 重复会刷新内置技能
+test("registerBuiltin 重复会刷新内置技能", async () => {
   const store = await tmpStore();
   await store.registerBuiltin({
     name: "builtin-same",
@@ -545,8 +604,6 @@ test("registerBuiltin 重复不覆盖", async () => {
     triggers: ["t1"],
     calls: [],
   });
-
-  const first = await store.readSkillContent("builtin-same");
 
   await store.registerBuiltin({
     name: "builtin-same",
@@ -557,11 +614,73 @@ test("registerBuiltin 重复不覆盖", async () => {
   });
 
   const second = await store.readSkillContent("builtin-same");
-  assert(first === second, "重复注册内置技能不应覆盖文件内容");
+  const rec = store.get("builtin-same");
+  assert(!!rec, "应保留内置技能记录");
+  assert(rec?.description === "desc2", "描述应刷新");
+  assert(rec?.triggers.join(",") === "t2", "触发词应刷新");
+  assert(rec?.calls.join(",") === "x", "调用链应刷新");
+  assert(second.includes("second"), "文件内容应刷新");
   return true;
 });
 
-// 25. save 生成正确 frontmatter
+// 28. parseSkillFrontmatter 支持 inline 数组
+test("parseSkillFrontmatter 支持 inline 数组", async () => {
+  const parsed = parseSkillFrontmatter(`---
+name: "inline-skill"
+description: "inline desc"
+triggers: ["a","b"]
+calls: []
+---
+
+# inline-skill
+
+body`);
+
+  assert(parsed.meta.name === "inline-skill", "应解析 name");
+  assert(parsed.meta.description === "inline desc", "应解析 description");
+  assert(parsed.meta.triggers?.join(",") === "a,b", "应解析 inline triggers");
+  assert(parsed.meta.calls?.length === 0, "应解析空 calls");
+  assert(parsed.body.includes("# inline-skill"), "应保留正文");
+  return true;
+});
+
+// 29. isSafeSkillName 允许自然命名并拦截危险名称
+test("isSafeSkillName 允许自然命名并拦截危险名称", async () => {
+  assert(isSafeSkillName("lint fix"), "应允许带空格的技能名");
+  assert(isSafeSkillName("逆向 APK"), "应允许中文技能名");
+  assert(!isSafeSkillName("../escape"), "不应允许路径穿越");
+  assert(!isSafeSkillName("bad/name"), "不应允许路径分隔符");
+  assert(!isSafeSkillName("CON"), "不应允许 Windows 保留名");
+  return true;
+});
+
+// 30. resolveBuiltinSkillsDir 同时兼容 src/dist 入口
+test("resolveBuiltinSkillsDir 同时兼容 src/dist 入口", async () => {
+  const expected = resolve("skills");
+  const srcUrl = pathToFileURL(resolve("src", "index.ts")).href;
+  const distUrl = pathToFileURL(resolve("dist", "index.js")).href;
+
+  assert(resolveBuiltinSkillsDir(srcUrl) === expected, "src 入口应解析到项目根 skills/");
+  assert(resolveBuiltinSkillsDir(distUrl) === expected, "dist 入口也应解析到项目根 skills/");
+  return true;
+});
+
+// 31. createInitializedStore 会加载内置技能
+test("createInitializedStore 会加载内置技能", async () => {
+  counter++;
+  const store = await createInitializedStore({
+    storePath: join(tmpDir, `skills_${counter}.json`),
+    repoDir: join(tmpDir, `repo_${counter}`),
+  });
+
+  const filesystem = store.get("filesystem");
+  assert(!!filesystem, "初始化后应包含 filesystem 内置技能");
+  assert(filesystem?.builtin === true, "内置技能应标记为 builtin");
+  assert(store.list().length >= 9, "初始化后应至少加载 9 个内置技能");
+  return true;
+});
+
+// 32. save 生成正确 frontmatter
 test("save 生成正确 frontmatter", async () => {
   const store = await tmpStore();
   await store.save({
@@ -583,7 +702,7 @@ test("save 生成正确 frontmatter", async () => {
   return true;
 });
 
-// 26. save 保留触发词
+// 33. save 保留触发词
 test("save 保留触发词", async () => {
   const store = await tmpStore();
   await store.save({

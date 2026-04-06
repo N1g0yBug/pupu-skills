@@ -4,29 +4,25 @@
  * 新执行模型：技能是 markdown 文档，服务器只负责管理、检索、评分与路由。
  */
 
-import { readFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { createInitializedStore } from "./bootstrap.js";
 import { logger, setLogLevel, LogLevel } from "./utils/logger.js";
 import { SkillStore, type SkillRecord } from "./memory/store.js";
 import { route, buildSkillSummary } from "./router/router.js";
+import { isSafeSkillName } from "./skills/validation.js";
 
 const server = new McpServer(
   { name: "pupu-skills", version: "1.0.0" },
   { capabilities: { tools: {} } }
 );
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SKILLS_DIR = join(__dirname, "..", "..", "skills");
-
 let storePromise: Promise<SkillStore> | null = null;
 
 function getStore(): Promise<SkillStore> {
   if (!storePromise) {
-    storePromise = SkillStore.create();
+    storePromise = createInitializedStore();
   }
   return storePromise;
 }
@@ -47,117 +43,6 @@ function fail(text: string, store: SkillStore): { content: Array<{ type: "text";
     content: [{ type: "text", text: withSkillSummary(text, store) }],
     isError: true,
   };
-}
-
-function parseFrontmatter(markdown: string): {
-  body: string;
-  meta: { name?: string; description?: string; triggers?: string[]; calls?: string[] };
-} {
-  const normalized = markdown.replace(/^\uFEFF/, "");
-  if (!normalized.startsWith("---\n")) {
-    return { body: normalized, meta: {} };
-  }
-
-  const end = normalized.indexOf("\n---\n", 4);
-  if (end < 0) {
-    return { body: normalized, meta: {} };
-  }
-
-  const frontmatter = normalized.slice(4, end);
-  const body = normalized.slice(end + 5).replace(/^\n+/, "");
-
-  const lines = frontmatter.split(/\r?\n/);
-  const meta: { name?: string; description?: string; triggers?: string[]; calls?: string[] } = {};
-
-  let cursor = 0;
-  while (cursor < lines.length) {
-    const line = lines[cursor].trim();
-    cursor += 1;
-
-    if (!line || line.startsWith("#")) {
-      continue;
-    }
-
-    if (line.startsWith("name:")) {
-      const raw = line.slice(5).trim();
-      if (raw) {
-        meta.name = raw.replace(/^['"]|['"]$/g, "");
-      }
-      continue;
-    }
-
-    if (line.startsWith("description:")) {
-      const raw = line.slice(12).trim();
-      if (raw) {
-        meta.description = raw.replace(/^['"]|['"]$/g, "");
-      }
-      continue;
-    }
-
-    if (line === "triggers:" || line === "calls:") {
-      const target = line.startsWith("triggers") ? "triggers" : "calls";
-      const values: string[] = [];
-
-      while (cursor < lines.length) {
-        const itemLine = lines[cursor];
-        const trimmed = itemLine.trim();
-        if (!trimmed.startsWith("-")) {
-          break;
-        }
-        const value = trimmed.slice(1).trim().replace(/^['"]|['"]$/g, "");
-        if (value) {
-          values.push(value);
-        }
-        cursor += 1;
-      }
-
-      if (target === "triggers") {
-        meta.triggers = values;
-      } else {
-        meta.calls = values;
-      }
-    }
-  }
-
-  return { body, meta };
-}
-
-async function loadBuiltinSkills(store: SkillStore): Promise<void> {
-  const builtinFiles = [
-    "filesystem",
-    "web-search",
-    "docx",
-    "pdf",
-    "xlsx",
-    "pptx",
-    "image-analysis",
-    "grep",
-    "skill-creator",
-  ];
-
-  for (const name of builtinFiles) {
-    const filePath = join(SKILLS_DIR, `${name}.md`);
-
-    try {
-      const raw = await readFile(filePath, "utf-8");
-      const parsed = parseFrontmatter(raw);
-
-      const description =
-        parsed.meta.description ??
-        parsed.body.split(/\r?\n/).find(line => line.trim().length > 0)?.replace(/^#+\s*/, "") ??
-        `内置技能 ${name}`;
-
-      await store.registerBuiltin({
-        name: parsed.meta.name ?? name,
-        content: parsed.body,
-        description,
-        triggers: parsed.meta.triggers ?? [],
-        calls: parsed.meta.calls ?? [],
-      });
-    } catch {
-      logger.warn("内置技能加载失败", { name });
-    }
-  }
 }
 
 function formatSkillBrief(skill: SkillRecord): string {
@@ -195,7 +80,11 @@ server.tool(
   {
     scriptName: z
       .string()
-      .regex(/^[a-zA-Z0-9_-]+$/, "技能名仅允许字母、数字、下划线和连字符")
+      .transform(name => name.trim())
+      .refine(
+        isSafeSkillName,
+        "技能名不能包含路径分隔符、控制字符、Windows 保留名，且不能以空格或点结尾"
+      )
       .describe("技能名称"),
     content: z.string().min(1, "content 不能为空").describe("技能 markdown 正文内容"),
     description: z.string().min(1, "description 不能为空").describe("技能描述"),
@@ -528,10 +417,122 @@ server.tool(
   }
 );
 
+server.tool(
+  "pupu_learn",
+  "自动学习：分析当前任务上下文，判断是否值得生成新技能或优化已有技能。每完成一个非平凡任务后应主动调用此工具。",
+  {
+    context: z.string().min(1).describe("当前任务上下文摘要：做了什么、怎么做的、用了什么工具/方法"),
+    taskType: z.string().min(1).describe("任务类型分类，如：逆向分析、代码审计、API调试、重构、数据处理等"),
+    approach: z.string().min(1).describe("采用的解决方法或步骤概述"),
+    result: z.enum(["success", "failure"]).describe("任务最终结果"),
+  },
+  async ({ context, taskType, approach, result }) => {
+    const store = await getStore();
+    const similarSkills = store.search(`${taskType} ${approach}`);
+
+    if (similarSkills.length > 0) {
+      const topSkill = similarSkills[0];
+      const lastExec = store.getLastExecution(topSkill.name);
+      const recentHistory = store.getHistory(topSkill.name, 5);
+      const recentFails = recentHistory.filter(item => !item.success).length;
+      const needsOptimize = recentFails >= 2 || (lastExec !== null && !lastExec.success);
+
+      if (needsOptimize) {
+        const suggestions: string[] = [];
+        if (recentFails >= 2) {
+          suggestions.push(`- 近期失败率较高(${recentFails}/5)，建议优化执行步骤`);
+        }
+        if (lastExec !== null && !lastExec.success) {
+          suggestions.push(`- 最近一次失败：${lastExec.error ?? "未知"}`);
+        }
+
+        return ok(
+          [
+            `自动学习结果`,
+            `任务类型：${taskType}`,
+            `已有类似技能：${topSkill.name}（效用分 ${topSkill.utilityScore}）`,
+            "",
+            "建议优化已有技能：",
+            ...suggestions,
+            "",
+            "请调用 pupu_reflect 获取详细改进建议，再用 pupu_write 更新技能内容。",
+          ].join("\n"),
+          store
+        );
+      }
+
+      return ok(
+        [
+          "自动学习结果",
+          `任务类型：${taskType}`,
+          `已有类似技能：${topSkill.name}（效用分 ${topSkill.utilityScore}）`,
+          "",
+          "已有技能可覆盖此任务，无需创建新技能。",
+        ].join("\n"),
+        store
+      );
+    }
+
+    const skillName = taskType
+      .toLowerCase()
+      .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 40);
+
+    const steps = approach
+      .split(/[;\n]/)
+      .map(step => step.trim())
+      .filter(Boolean);
+
+    const draftContent = [
+      `# ${skillName}`,
+      "",
+      "## 触发条件",
+      `当遇到${taskType}相关任务时使用此技能。`,
+      "",
+      "## 执行步骤",
+      ...(steps.length > 0 ? steps.map((step, index) => `${index + 1}. ${step}`) : ["1. 根据当前任务补充执行步骤。"]),
+      "",
+      "## 注意事项",
+      `- 来源任务上下文：${context.slice(0, 100)}`,
+      "",
+      "## 改进记录",
+      "- v1: 由自动学习生成，需根据实际使用情况优化",
+    ].join("\n");
+
+    const triggerWords = [
+      taskType,
+      ...taskType.split(/[/、,]/).map(item => item.trim()).filter(Boolean),
+      ...approach.split(/\s+/).map(item => item.trim()).filter(word => word.length >= 2).slice(0, 5),
+    ].filter(Boolean);
+
+    return ok(
+      [
+        "自动学习结果",
+        `任务类型：${taskType}`,
+        `结果：${result === "success" ? "成功" : "失败"}`,
+        "",
+        "未找到类似技能，建议创建新技能：",
+        `名称：${skillName}`,
+        `触发词：${triggerWords.slice(0, 6).join("、") || "无"}`,
+        "",
+        "技能草稿：",
+        "```markdown",
+        draftContent,
+        "```",
+        "",
+        "如需保存，请调用 pupu_write，将上述草稿作为 content 参数传入。",
+        "如需调整触发词或内容，请先修改后再保存。",
+      ].join("\n"),
+      store
+    );
+  }
+);
+
 export async function startMcpServer(): Promise<void> {
   setLogLevel(LogLevel.INFO);
   const store = await getStore();
-  await loadBuiltinSkills(store);
 
   const count = store.list().length;
   logger.info(`技能库已加载: ${count} 个技能`);

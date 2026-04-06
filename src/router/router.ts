@@ -12,10 +12,14 @@ export interface RouteResponse {
   summary: string;
 }
 
-const MAX_RECOMMENDATIONS = 5;
+interface ScoredRouteResult extends RouteResult {
+  hasTaskSignal: boolean;
+}
+
+const MAX_RECOMMENDATIONS = 8;
 const MIN_CONFIDENCE = 15;
 
-/** 将文本归一化后分词（小写、去标点、按空白切分） */
+/** 将文本归一化后分词：英文按空白切分，中文按单字+双字切分 */
 function tokenize(text: string): string[] {
   const normalized = text
     .toLowerCase()
@@ -23,7 +27,28 @@ function tokenize(text: string): string[] {
     .trim();
 
   if (!normalized) return [];
-  return normalized.split(/\s+/).filter(Boolean);
+
+  const tokens: string[] = [];
+  const segments = normalized.split(/\s+/).filter(Boolean);
+
+  for (const segment of segments) {
+    if (/^[\u4e00-\u9fff]+$/.test(segment)) {
+      tokens.push(segment);
+      for (const char of segment) {
+        tokens.push(char);
+      }
+      if (segment.length >= 2) {
+        for (let i = 0; i < segment.length - 1; i++) {
+          tokens.push(segment.slice(i, i + 2));
+        }
+      }
+      continue;
+    }
+
+    tokens.push(segment);
+  }
+
+  return tokens;
 }
 
 /** 提取技能触发词（兼容并行改造期间 triggers 可能未就绪） */
@@ -50,7 +75,7 @@ function isPhraseMatched(phrase: string, normalizedTaskText: string, taskTokenSe
 }
 
 /** 对单个技能计算匹配结果 */
-function scoreSkill(task: string, skill: SkillRecord): RouteResult {
+function scoreSkill(task: string, skill: SkillRecord): ScoredRouteResult {
   const taskTokens = tokenize(task);
   const taskTokenSet = new Set(taskTokens);
   const normalizedTaskText = taskTokens.join(" ");
@@ -58,19 +83,22 @@ function scoreSkill(task: string, skill: SkillRecord): RouteResult {
   const skillNameTokens = tokenize(skill.name);
   const normalizedSkillName = skillNameTokens.join(" ");
 
-  let score = 0;
+  let signalScore = 0;
   const reasons: string[] = [];
+  let hasTaskSignal = false;
 
   // 名称完全匹配 +40
   if (normalizedSkillName.length > 0 && (normalizedTaskText === normalizedSkillName || taskTokenSet.has(normalizedSkillName))) {
-    score += 40;
+    signalScore += 40;
+    hasTaskSignal = true;
     reasons.push("名称完全匹配(+40)");
   } else if (
     // 名称部分匹配 +20
     normalizedSkillName.length > 0 &&
     (normalizedTaskText.includes(normalizedSkillName) || skillNameTokens.some(token => taskTokenSet.has(token)))
   ) {
-    score += 20;
+    signalScore += 20;
+    hasTaskSignal = true;
     reasons.push("名称部分匹配(+20)");
   }
 
@@ -82,7 +110,8 @@ function scoreSkill(task: string, skill: SkillRecord): RouteResult {
   }
   if (descriptionHits > 0) {
     const descriptionScore = Math.min(30, descriptionHits * 5);
-    score += descriptionScore;
+    signalScore += descriptionScore;
+    hasTaskSignal = true;
     reasons.push(`描述关键词命中${descriptionHits}个(+${descriptionScore})`);
   }
 
@@ -96,13 +125,13 @@ function scoreSkill(task: string, skill: SkillRecord): RouteResult {
   }
   if (triggerHits > 0) {
     const triggerScore = Math.min(40, triggerHits * 10);
-    score += triggerScore;
+    signalScore += triggerScore;
+    hasTaskSignal = true;
     reasons.push(`触发词命中${triggerHits}个(+${triggerScore})`);
   }
 
-  // 效用分权重加成：utilityScore * 0.2
   const utilityBonus = Math.max(0, Math.min(20, skill.utilityScore * 0.2));
-  score += utilityBonus;
+  const score = signalScore + utilityBonus;
   reasons.push(`效用分加成(+${Math.round(utilityBonus)})`);
 
   const confidence = clampScore(score);
@@ -110,16 +139,27 @@ function scoreSkill(task: string, skill: SkillRecord): RouteResult {
     skill,
     confidence,
     matchReason: reasons.join("；"),
+    hasTaskSignal,
   };
 }
 
 export function route(task: string, skills: SkillRecord[]): RouteResponse {
   const ranked = skills
     .map(skill => scoreSkill(task, skill))
-    .sort((a, b) => b.confidence - a.confidence)
+    .sort((a, b) => {
+      if (a.hasTaskSignal !== b.hasTaskSignal) {
+        return Number(b.hasTaskSignal) - Number(a.hasTaskSignal);
+      }
+      if (b.confidence !== a.confidence) {
+        return b.confidence - a.confidence;
+      }
+      return b.skill.utilityScore - a.skill.utilityScore;
+    })
     .slice(0, MAX_RECOMMENDATIONS);
 
-  const recommendations = ranked.filter(item => item.confidence >= MIN_CONFIDENCE);
+  const recommendations = ranked
+    .filter(item => item.hasTaskSignal && item.confidence >= MIN_CONFIDENCE)
+    .map(({ hasTaskSignal: _hasTaskSignal, ...item }) => item);
 
   if (recommendations.length === 0) {
     return {
@@ -143,13 +183,24 @@ export function buildSkillSummary(skills: SkillRecord[]): string {
 
   const ranked = [...skills]
     .sort((a, b) => b.utilityScore - a.utilityScore)
-    .slice(0, 8)
-    .map(skill => `${skill.name}(${Math.round(skill.utilityScore)}分)`)
-    .join(" | ");
+    .slice(0, 12);
+
+  const skillList = ranked
+    .map(skill => {
+      const description = skill.description ? `: ${skill.description}` : "";
+      return `  - ${skill.name}(${Math.round(skill.utilityScore)}分)${description}`;
+    })
+    .join("\n");
 
   return [
-    `📊 技能库: ${total} 个技能 (${builtinCount} 内置)`,
-    `📋 可用: ${ranked || "暂无"}`,
-    "💡 提示: 遇到新任务时，先调用 pupu_route 获取推荐技能",
+    `技能库: ${total} 个技能 (${builtinCount} 内置)`,
+    `可用:\n${skillList || "暂无"}`,
+    "",
+    "重要行为规则（每次都必须遵守）：",
+    "1. 接到任务时，先查看上方技能库摘要。如果有匹配的技能直接使用；如果不确定，调用 pupu_route 获取推荐",
+    "2. 完成任务后（无论成功失败），必须调用 pupu_learn 上报任务上下文进行学习",
+    "   - pupu_learn 会自动判断是否需要创建新技能或优化已有技能",
+    "   - 这是被动学习机制的核心，不需要用户主动要求",
+    "3. 如果 pupu_learn 建议创建技能，请立即用 pupu_write 保存",
   ].join("\n");
 }
