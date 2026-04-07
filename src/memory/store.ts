@@ -1,5 +1,6 @@
 /**
  * Markdown 技能存储：仅负责技能元数据与文档持久化。
+ * 内部主键为 skillId（scope + workspaceId + name），支持同名技能在不同 workspace 共存。
  */
 
 import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
@@ -118,6 +119,10 @@ type BuiltinLegacyInput = {
   triggers?: string[];
   calls?: string[];
 };
+
+export interface SkillOptions {
+  workspaceId?: string;
+}
 
 // ── 常量 ───────────────────────────────────────────────────────────────
 
@@ -261,6 +266,48 @@ function sanitizeStringArray(input: unknown): string[] {
   return input.filter((item): item is string => typeof item === "string");
 }
 
+/**
+ * 构建技能唯一 ID（内部主键）。
+ * global 技能: "global:<name>"
+ * workspace 技能: "workspace:<workspaceId>:<name>"
+ */
+function buildSkillId(input: {
+  name: string;
+  scope: "global" | "workspace";
+  workspaceId?: string;
+}): string {
+  return input.scope === "workspace" && input.workspaceId
+    ? `workspace:${input.workspaceId}:${input.name}`
+    : `global:${input.name}`;
+}
+
+/**
+ * 根据技能名和 workspaceId 查找技能。
+ * - 有 workspaceId: 优先 workspace, fallback global
+ * - 无 workspaceId: 只查 global
+ */
+function resolveSkillKeys(name: string, options?: SkillOptions): string[] {
+  if (options?.workspaceId) {
+    return [`workspace:${options.workspaceId}:${name}`, `global:${name}`];
+  }
+  return [`global:${name}`];
+}
+
+/**
+ * 构建技能的文件路径，按 workspace 分目录。
+ */
+function buildSkillFilePath(
+  repoDir: string,
+  name: string,
+  scope: "global" | "workspace",
+  workspaceId?: string,
+): string {
+  if (scope === "workspace" && workspaceId) {
+    return resolve(repoDir, "workspace", workspaceId, `${name}.md`);
+  }
+  return resolve(repoDir, "global", `${name}.md`);
+}
+
 function normalizeSkillRecord(input: LegacySkillRecord, repoDir: string): SkillRecord {
   const now = new Date().toISOString();
   const name = input.name;
@@ -271,9 +318,13 @@ function normalizeSkillRecord(input: LegacySkillRecord, repoDir: string): SkillR
     ? input.successCount
     : history.filter(h => h.success).length;
 
+  const scope = input.scope ?? "global";
+  const workspaceId = scope === "workspace" ? input.workspaceId : undefined;
+
   const rawPath = typeof input.filePath === "string" && input.filePath.trim()
     ? input.filePath
-    : resolve(repoDir, `${name}.md`);
+    : buildSkillFilePath(repoDir, name, scope, workspaceId);
+
   const normalizedPath = rawPath.endsWith(".mjs")
     ? rawPath.slice(0, -4) + ".md"
     : rawPath;
@@ -286,8 +337,8 @@ function normalizeSkillRecord(input: LegacySkillRecord, repoDir: string): SkillR
     triggers: sanitizeStringArray(input.triggers),
     tags: sanitizeStringArray(input.tags),
     antiTriggers: sanitizeStringArray(input.antiTriggers),
-    scope: input.scope ?? "global",
-    workspaceId: input.workspaceId,
+    scope,
+    workspaceId,
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? now,
     executionCount,
@@ -332,19 +383,25 @@ export class SkillStore {
       const skillsInput = parsed.skills ?? {};
       const skills: Record<string, SkillRecord> = {};
 
-      for (const [name, value] of Object.entries(skillsInput)) {
+      for (const [key, value] of Object.entries(skillsInput)) {
         if (!value || typeof value !== "object") continue;
-        if (typeof value.name !== "string") value.name = name;
+        if (typeof value.name !== "string") value.name = key;
         if (typeof value.description !== "string") value.description = "";
-        if (typeof value.filePath !== "string") value.filePath = resolve(repoDir, `${name}.md`);
-        skills[name] = normalizeSkillRecord(value, repoDir);
+
+        const record = normalizeSkillRecord(value, repoDir);
+
+        // 旧版数据 key 可能是 name（不含 `:` 分隔符），需要重新生成 skillId
+        const scope = record.scope;
+        const workspaceId = scope === "workspace" ? record.workspaceId : undefined;
+        const skillId = buildSkillId({ name: record.name, scope, workspaceId });
+        skills[skillId] = record;
       }
 
-      data = { version: 2, skills };
+      data = { version: 3, skills };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
       if (code === "ENOENT") {
-        data = { version: 2, skills: {} };
+        data = { version: 3, skills: {} };
         logger.info("已初始化新技能存储", { path: storePath });
       } else {
         logger.error("技能存储读取/解析失败，已备份并初始化空存储", { path: storePath, error: String(error) });
@@ -354,7 +411,7 @@ export class SkillStore {
         } catch {
           // 备份失败不阻塞启动
         }
-        data = { version: 2, skills: {} };
+        data = { version: 3, skills: {} };
       }
     }
 
@@ -362,12 +419,31 @@ export class SkillStore {
     return store;
   }
 
-  get(name: string): SkillRecord | undefined {
-    return this.data.skills[name];
+  /**
+   * 按名称查找技能。
+   * - 有 workspaceId: 优先 workspace 技能，fallback global
+   * - 无 workspaceId: 只命中 global
+   */
+  get(name: string, options?: SkillOptions): SkillRecord | undefined {
+    for (const key of resolveSkillKeys(name, options)) {
+      const skill = this.data.skills[key];
+      if (skill) return skill;
+    }
+    return undefined;
   }
 
-  list(): SkillRecord[] {
-    return Object.values(this.data.skills)
+  /**
+   * 列出技能。
+   * - 有 workspaceId: 只返回 global + 当前 workspace 的技能
+   * - 无 workspaceId: 返回所有技能（向后兼容）
+   */
+  list(options?: SkillOptions): SkillRecord[] {
+    const all = Object.values(this.data.skills);
+    const visible = options?.workspaceId
+      ? all.filter(s => s.scope === "global" || s.workspaceId === options.workspaceId)
+      : all;
+
+    return visible
       .map(skill => ({
         ...skill,
         history: [...skill.history],
@@ -379,18 +455,18 @@ export class SkillStore {
       .sort((a, b) => b.utilityScore - a.utilityScore);
   }
 
-  search(query: string, options?: { workspaceId?: string }): SkillRecord[] {
+  search(query: string, options?: SkillOptions): SkillRecord[] {
     const q = query.trim().toLowerCase();
+
+    // 先获取可见技能
+    const visible = this.list(options);
+
     if (!q || q === "*") {
-      const all = this.list();
-      if (options?.workspaceId) {
-        return all.filter(s => s.scope === "global" || s.workspaceId === options.workspaceId);
-      }
-      return all;
+      return visible;
     }
 
     const terms = q.split(/\s+/).filter(Boolean);
-    const matches = Object.values(this.data.skills)
+    const matches = visible
       .map(skill => {
         const haystack = [
           skill.name,
@@ -407,7 +483,7 @@ export class SkillStore {
         return b.skill.utilityScore - a.skill.utilityScore;
       });
 
-    let results = matches.map(item => ({
+    return matches.map(item => ({
       ...item.skill,
       history: [...item.skill.history],
       triggers: [...item.skill.triggers],
@@ -415,16 +491,16 @@ export class SkillStore {
       tags: [...item.skill.tags],
       antiTriggers: [...item.skill.antiTriggers],
     }));
-
-    if (options?.workspaceId) {
-      results = results.filter(s => s.scope === "global" || s.workspaceId === options.workspaceId);
-    }
-
-    return results;
   }
 
-  getLowUtility(threshold: number): SkillRecord[] {
-    return Object.values(this.data.skills)
+  getLowUtility(threshold: number, options?: SkillOptions): SkillRecord[] {
+    const visible = options?.workspaceId
+      ? Object.values(this.data.skills).filter(
+          s => s.scope === "global" || s.workspaceId === options.workspaceId
+        )
+      : Object.values(this.data.skills);
+
+    return visible
       .filter(skill => skill.executionCount >= 2 && skill.utilityScore < threshold)
       .sort((a, b) => a.utilityScore - b.utilityScore)
       .map(skill => ({
@@ -437,14 +513,14 @@ export class SkillStore {
       }));
   }
 
-  getHistory(name: string, limit: number): ExecutionRecord[] {
-    const skill = this.data.skills[name];
+  getHistory(name: string, limit: number, options?: SkillOptions): ExecutionRecord[] {
+    const skill = this.get(name, options);
     if (!skill) return [];
     return skill.history.slice(-limit).reverse();
   }
 
-  getLastExecution(name: string): ExecutionRecord | null {
-    const skill = this.data.skills[name];
+  getLastExecution(name: string, options?: SkillOptions): ExecutionRecord | null {
+    const skill = this.get(name, options);
     if (!skill || skill.history.length === 0) return null;
     return skill.history[skill.history.length - 1];
   }
@@ -459,14 +535,23 @@ export class SkillStore {
 
   // 兼容旧调用：允许 code 字段
   async save(skill: SaveCompatInput | SaveLegacyInput): Promise<SkillRecord> {
-    const existing = this.data.skills[skill.name];
+    const scope = skill.scope ?? "global";
+
+    // scope=global 时 workspaceId 强制清空
+    const workspaceId = scope === "workspace" ? skill.workspaceId : undefined;
+
+    const newSkillId = buildSkillId({ name: skill.name, scope, workspaceId });
+
+    // 只在相同 scope+workspaceId 查找已有技能，不使用 fallback
+    const existing = this.data.skills[newSkillId];
+
     if (existing?.builtin) {
       throw new Error(`内置技能 "${skill.name}" 不可覆盖`);
     }
 
     const now = new Date().toISOString();
     const content = "content" in skill ? skill.content : skill.code;
-    const filePath = resolve(this.repoDir, `${skill.name}.md`);
+    const filePath = buildSkillFilePath(this.repoDir, skill.name, scope, workspaceId);
 
     const record: SkillRecord = {
       name: skill.name,
@@ -476,8 +561,8 @@ export class SkillStore {
       triggers: skill.triggers ?? existing?.triggers ?? [],
       tags: skill.tags ?? existing?.tags ?? [],
       antiTriggers: skill.antiTriggers ?? existing?.antiTriggers ?? [],
-      scope: skill.scope ?? existing?.scope ?? "global",
-      workspaceId: skill.workspaceId ?? existing?.workspaceId,
+      scope,
+      workspaceId,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       executionCount: existing?.executionCount ?? 0,
@@ -490,33 +575,35 @@ export class SkillStore {
 
     record.utilityScore = computeUtilityScore(record);
 
+    await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, `${buildFrontmatter(record)}\n${content}`, "utf-8");
-    this.data.skills[skill.name] = record;
+    this.data.skills[newSkillId] = record;
     await this.flush();
 
-    logger.info("已保存 markdown 技能", { name: skill.name, path: filePath });
+    logger.info("已保存 markdown 技能", { name: skill.name, scope, workspaceId, path: filePath });
     return record;
   }
 
-  async delete(name: string): Promise<boolean> {
-    const record = this.data.skills[name];
-    if (!record || record.builtin) return false;
+  async delete(name: string, options?: SkillOptions): Promise<boolean> {
+    const skill = this.get(name, options);
+    if (!skill || skill.builtin) return false;
 
-    delete this.data.skills[name];
+    const skillId = buildSkillId({ name: skill.name, scope: skill.scope, workspaceId: skill.workspaceId });
+    delete this.data.skills[skillId];
     await this.flush();
 
     try {
-      await unlink(record.filePath);
-      logger.info("已删除技能文档", { name, path: record.filePath });
+      await unlink(skill.filePath);
+      logger.info("已删除技能文档", { name, skillId, path: skill.filePath });
     } catch {
-      logger.warn("技能文档删除失败", { name, path: record.filePath });
+      logger.warn("技能文档删除失败", { name, skillId, path: skill.filePath });
     }
 
     return true;
   }
 
-  async recordExecution(name: string, execRecord: ExecutionRecord | LegacyExecutionRecord): Promise<void> {
-    const skill = this.data.skills[name];
+  async recordExecution(name: string, execRecord: ExecutionRecord | LegacyExecutionRecord, options?: SkillOptions): Promise<void> {
+    const skill = this.get(name, options);
     if (!skill) return;
 
     const normalized = normalizeExecutionRecord(execRecord);
@@ -541,9 +628,11 @@ export class SkillStore {
 
   async registerBuiltin(skill: BuiltinInput | BuiltinLegacyInput): Promise<void> {
     const now = new Date().toISOString();
-    const filePath = resolve(this.repoDir, `${skill.name}.md`);
+    const scope = "global" as const;
     const content = "content" in skill ? skill.content : skill.code;
-    const existing = this.data.skills[skill.name];
+    const filePath = buildSkillFilePath(this.repoDir, skill.name, scope);
+    const skillId = buildSkillId({ name: skill.name, scope });
+    const existing = this.data.skills[skillId];
 
     if (existing && !existing.builtin) {
       return;
@@ -580,23 +669,24 @@ export class SkillStore {
         };
 
     record.utilityScore = computeUtilityScore(record);
+    await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, `${buildFrontmatter(record)}\n${content}`, "utf-8");
 
-    this.data.skills[skill.name] = record;
+    this.data.skills[skillId] = record;
     await this.flush();
     logger.info(existing?.builtin ? "已刷新内置 markdown 技能" : "已注册内置 markdown 技能", { name: skill.name });
   }
 
-  async readSkillContent(name: string): Promise<string> {
-    const skill = this.data.skills[name];
+  async readSkillContent(name: string, options?: SkillOptions): Promise<string> {
+    const skill = this.get(name, options);
     if (!skill) {
       throw new Error(`技能不存在: ${name}`);
     }
     return readFile(skill.filePath, "utf-8");
   }
 
-  async updateSkillContent(name: string, content: string): Promise<void> {
-    const skill = this.data.skills[name];
+  async updateSkillContent(name: string, content: string, options?: SkillOptions): Promise<void> {
+    const skill = this.get(name, options);
     if (!skill) {
       throw new Error(`技能不存在: ${name}`);
     }
@@ -607,14 +697,20 @@ export class SkillStore {
     await writeFile(skill.filePath, next, "utf-8");
   }
 
-  resolveSkillGraph(rootName: string): { ordered: { name: string; depth: number }[]; cycles: string[] } {
-    if (!this.data.skills[rootName]) return { ordered: [], cycles: [] };
+  /**
+   * 解析技能依赖图。
+   * - 优先在当前 workspace 查找依赖技能
+   * - fallback 到 global
+   */
+  resolveSkillGraph(rootName: string, options?: SkillOptions): { ordered: { name: string; depth: number }[]; cycles: string[] } {
+    const rootSkill = this.get(rootName, options);
+    if (!rootSkill) return { ordered: [], cycles: [] };
 
     const visited = new Set<string>();
     const inStack = new Set<string>();
     const ordered: { name: string; depth: number }[] = [];
     const cycles: string[] = [];
-    const allSkills = this.data.skills;
+    const self = this;
 
     function dfs(name: string, depth: number): void {
       if (depth > 20) return;
@@ -625,7 +721,7 @@ export class SkillStore {
       if (visited.has(name)) return;
 
       inStack.add(name);
-      const skill = allSkills[name];
+      const skill = self.get(name, options);
       if (skill) {
         for (const dep of skill.calls) {
           dfs(dep, depth + 1);

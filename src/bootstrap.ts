@@ -37,6 +37,8 @@ export async function loadBuiltinSkills(store: SkillStore): Promise<void> {
         description,
         triggers: parsed.meta.triggers ?? [],
         calls: parsed.meta.calls ?? [],
+        tags: parsed.meta.tags ?? [],
+        antiTriggers: parsed.meta.antiTriggers ?? [],
       });
     } catch {
       logger.warn("内置技能加载失败", { name });

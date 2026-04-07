@@ -166,8 +166,13 @@ export function route(task: string, skills: SkillRecord[], options?: RouteOption
   const taskTokens = tokenize(task);
   const taskTokenSet = new Set(taskTokens);
 
+  // 保护性过滤：只保留当前可见技能（global + 当前 workspace）
+  const visibleSkills = skills.filter(
+    s => s.scope === "global" || s.workspaceId === options?.workspaceId
+  );
+
   // Phase 1: 召回
-  const ranked = skills
+  const ranked = visibleSkills
     .map(skill => scoreSkill(task, skill))
     .sort((a, b) => {
       if (a.hasTaskSignal !== b.hasTaskSignal) {
@@ -281,9 +286,9 @@ export function buildSkillSummary(skills: SkillRecord[]): string {
     "",
     "重要行为规则（每次都必须遵守）：",
     "1. 接到任务时，先查看上方技能库摘要。如果有匹配的技能直接使用；如果不确定，调用 pupu_route 获取推荐",
-    "2. 完成任务后（无论成功失败），必须调用 pupu_learn 上报任务上下文进行学习",
-    "   - pupu_learn 会自动判断是否需要创建新技能或优化已有技能",
-    "   - 这是被动学习机制的核心，不需要用户主动要求",
-    "3. 如果 pupu_learn 建议创建技能，请立即用 pupu_write 保存",
+    "2. 完成任务后（无论成功失败），优先调用 pupu_after_task 进行收尾闭环",
+    "   - pupu_after_task 整合了结果记录与学习判断",
+    "   - 如需单独深度学习分析，可再调用 pupu_learn",
+    "3. 如果 pupu_after_task 建议创建技能，请立即用 pupu_write 保存",
   ].join("\n");
 }

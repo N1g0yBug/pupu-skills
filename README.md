@@ -152,7 +152,7 @@ scope: global
     ↓
 pupu_execute（读技能文档 → Claude 执行）
     ↓
-成功 → pupu_report（记录成功） → 效用分 ↑
+完成 → pupu_after_task（记录结果 + 自动学习判断） → 效用分更新
 失败 → pupu_reflect（分析原因） → 修复技能
 ```
 
@@ -193,7 +193,7 @@ pupu_route({ task: "帮我处理这个 Excel 表格" })
 
 重要行为规则（每次都必须遵守）：
 1. 接到任务时，先查看技能库摘要；不确定时调用 pupu_route
-2. 完成任务后，调用 pupu_learn 上报上下文进行被动学习
+2. 完成任务后，优先调用 pupu_after_task 进行收尾闭环
 ```
 
 Claude 在任何交互后都能看到可用技能，不需要主动搜索。
@@ -215,6 +215,16 @@ Claude 在任何交互后都能看到可用技能，不需要主动搜索。
 | `pupu_route` | 根据任务描述推荐技能（分词 + 触发词 + 效用评分） |
 | `pupu_learn` | 自动学习，判断是否需要新建或优化技能 |
 | `pupu_after_task` | **任务收尾**：记录结果 + 自动判断学习动作（整合 report + learn） |
+
+### Workspace 隔离
+
+技能库支持 workspace 隔离。不同项目可以各自拥有同名技能，互不影响：
+
+- **global 技能**：所有 workspace 可见，适用于通用场景
+- **workspace 技能**：仅在指定 workspace 可见，优先于同名 global 技能
+- 所有 MCP tool 均支持 `workspaceId` 参数，精确操作当前 workspace 的技能
+- 技能路由和摘要只展示当前 workspace 可见的技能（global + 当前 workspace）
+- 不传 `workspaceId` 时只命中 global 技能，避免歧义
 
 ---
 
@@ -256,8 +266,8 @@ pupu-skills/
 ├── src/
 │   ├── index.ts                 # MCP Server — 10 个 Tool
 │   ├── cli.ts                   # CLI: start/list/show/history/delete
-│   ├── memory/store.ts          # 技能存储 + 效用评分
-│   ├── router/router.ts         # LLM 技能路由
+│   ├── memory/store.ts          # 技能存储 + 效用评分 + workspace 隔离
+│   ├── router/router.ts         # LLM 技能路由（workspace 过滤）
 │   └── utils/logger.ts
 └── package.json
 ```
@@ -286,7 +296,7 @@ pupu-skills/
 ```bash
 npm install
 npm run build        # tsc 编译
-npm test             # 33 个 e2e 测试
+npm test             # 49 个 e2e 测试
 npm run dev          # 开发模式启动 MCP server
 ```
 

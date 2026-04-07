@@ -576,7 +576,8 @@ test("buildSkillSummary", async () => {
   assert(text.includes("技能库: 2 个技能 (1 内置)"), "应包含总数与内置数");
   assert(text.includes("可用:\n"), "应包含可用技能列表");
   assert(text.includes("a-skill(50分): A 技能描述"), "摘要中应包含技能描述");
-  assert(text.includes("必须调用 pupu_learn"), "应包含自动学习规则");
+  assert(text.includes("pupu_after_task"), "应包含 after_task 闭环规则");
+  assert(!text.includes("必须调用 pupu_learn"), "不应包含旧的强推 pupu_learn 规则");
   assert(!text.includes("📊"), "摘要中不应包含 emoji");
   return true;
 });
@@ -931,6 +932,232 @@ test("after_task 成功无关联技能时搜索类似", async () => {
 
   assert(similarSkills.length > 0, "应搜索到类似技能");
   assert(similarSkills[0].name === "git-commit", "应匹配到 git-commit");
+  return true;
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 新增：workspace 隔离专项测试
+// ═══════════════════════════════════════════════════════════════
+
+// 43. 同名技能在不同 workspace 下可共存
+test("同名技能不同 workspace 共存", async () => {
+  const store = await tmpStore();
+
+  // deploy@global
+  await seedSkill(store, "deploy", { description: "全局部署", triggers: ["deploy"] });
+  // deploy@ws-a
+  await seedSkill(store, "deploy", { description: "A 项目部署", scope: "workspace", workspaceId: "ws-a", triggers: ["deploy"] });
+  // deploy@ws-b
+  await seedSkill(store, "deploy", { description: "B 项目部署", scope: "workspace", workspaceId: "ws-b", triggers: ["deploy"] });
+
+  // 三个都能各自读到
+  const globalDeploy = store.get("deploy");
+  const wsADeploy = store.get("deploy", { workspaceId: "ws-a" });
+  const wsBDeploy = store.get("deploy", { workspaceId: "ws-b" });
+
+  assert(!!globalDeploy, "全局 deploy 应存在");
+  assert(!!wsADeploy, "ws-a deploy 应存在");
+  assert(!!wsBDeploy, "ws-b deploy 应存在");
+
+  assert(globalDeploy!.description === "全局部署", "全局 deploy 描述应正确");
+  assert(wsADeploy!.description === "A 项目部署", "ws-a deploy 描述应正确");
+  assert(wsBDeploy!.description === "B 项目部署", "ws-b deploy 描述应正确");
+
+  // list 应该返回 3 个技能（1 global + 2 workspace）
+  const all = store.list();
+  assert(all.length === 3, "list() 应返回全部 3 个同名但不同 workspace 的技能");
+
+  // list 带 workspaceId 应过滤
+  const wsAList = store.list({ workspaceId: "ws-a" });
+  assert(wsAList.length === 2, "ws-a list 应返回 2 个（global + ws-a）");
+  assert(wsAList.every(s => s.name === "deploy"), "ws-a list 所有技能都应是 deploy");
+
+  return true;
+});
+
+// 44. get/read/report/history/delete 按 workspaceId 精确命中
+test("get/read/report/history/delete 按 workspaceId 精确命中", async () => {
+  const store = await tmpStore();
+
+  await seedSkill(store, "deploy", { description: "全局部署", scope: "global", triggers: ["deploy"] });
+  await seedSkill(store, "deploy", { description: "A 部署", scope: "workspace", workspaceId: "ws-a", triggers: ["deploy"] });
+  await seedSkill(store, "deploy", { description: "B 部署", scope: "workspace", workspaceId: "ws-b", triggers: ["deploy"] });
+
+  // get 精确命中
+  assert(store.get("deploy", { workspaceId: "ws-a" })?.description === "A 部署", "get ws-a 应命中 A 部署");
+  assert(store.get("deploy", { workspaceId: "ws-b" })?.description === "B 部署", "get ws-b 应命中 B 部署");
+  assert(store.get("deploy")?.description === "全局部署", "get 不带 workspaceId 应命中全局");
+
+  // recordExecution 精确命中
+  await store.recordExecution("deploy", {
+    timestamp: iso(), success: true, duration: 10, summary: "ws-a exec", error: null, context: "ctx",
+  }, { workspaceId: "ws-a" });
+  await store.recordExecution("deploy", {
+    timestamp: iso(), success: false, duration: 5, summary: "ws-b fail", error: "err", context: "ctx",
+  }, { workspaceId: "ws-b" });
+
+  const wsAHistory = store.getHistory("deploy", 10, { workspaceId: "ws-a" });
+  const wsBHistory = store.getHistory("deploy", 10, { workspaceId: "ws-b" });
+  const globalHistory = store.getHistory("deploy", 10);
+
+  assert(wsAHistory.length === 1 && wsAHistory[0].summary === "ws-a exec", "ws-a history 应只有 ws-a 记录");
+  assert(wsBHistory.length === 1 && wsBHistory[0].summary === "ws-b fail", "ws-b history 应只有 ws-b 记录");
+  assert(globalHistory.length === 0, "全局 history 应为空（没有执行过全局 deploy）");
+
+  // delete 精确命中
+  const deleted = await store.delete("deploy", { workspaceId: "ws-a" });
+  assert(deleted === true, "删除 ws-a deploy 应成功");
+  assert(store.get("deploy", { workspaceId: "ws-a" })?.description === "全局部署", "删除 ws-a 后应 fallback 到全局");
+  assert(store.get("deploy", { workspaceId: "ws-b" })?.description === "B 部署", "ws-b deploy 不受影响");
+
+  return true;
+});
+
+// 45. route() 不返回其他 workspace 的技能
+test("route() 不返回其他 workspace 的技能", async () => {
+  const store = await tmpStore();
+
+  await seedSkill(store, "deploy", { description: "全局部署", triggers: ["deploy", "发布"] });
+  await seedSkill(store, "deploy", { description: "A 项目专用部署", scope: "workspace", workspaceId: "ws-a", triggers: ["deploy"] });
+  await seedSkill(store, "analyze", { description: "B 项目专用分析", scope: "workspace", workspaceId: "ws-b", triggers: ["分析"] });
+
+  // 当前在 ws-a，路由 deploy
+  const resultWsA = route("帮我部署", store.list(), { workspaceId: "ws-a" });
+  assert(resultWsA.recommendations.length >= 1, "ws-a 应有推荐");
+
+  // 不应出现 ws-b 的 analyze 技能
+  const hasWsB = resultWsA.recommendations.some(
+    r => r.skill.workspaceId === "ws-b"
+  );
+  assert(!hasWsB, "ws-a 路由结果不应出现 ws-b 的技能");
+
+  // 当前在 ws-b，路由分析
+  const resultWsB = route("帮我分析代码", store.list(), { workspaceId: "ws-b" });
+  const hasWsA = resultWsB.recommendations.some(
+    r => r.skill.workspaceId === "ws-a"
+  );
+  assert(!hasWsA, "ws-b 路由结果不应出现 ws-a 的技能");
+
+  return true;
+});
+
+// 46. buildSkillSummary() 不泄漏其他 workspace 技能
+test("buildSkillSummary() 不泄漏其他 workspace", async () => {
+  const store = await tmpStore();
+
+  await seedSkill(store, "common", { description: "公共技能" });
+  await seedSkill(store, "ws-a-only", { description: "A 专属", scope: "workspace", workspaceId: "ws-a" });
+  await seedSkill(store, "ws-b-only", { description: "B 专属", scope: "workspace", workspaceId: "ws-b" });
+
+  const wsASummary = buildSkillSummary(store.list({ workspaceId: "ws-a" }));
+  assert(wsASummary.includes("common"), "ws-a 摘要应包含全局技能");
+  assert(wsASummary.includes("ws-a-only"), "ws-a 摘要应包含 ws-a 技能");
+  assert(!wsASummary.includes("ws-b-only"), "ws-a 摘要不应包含 ws-b 技能");
+
+  const wsBSummary = buildSkillSummary(store.list({ workspaceId: "ws-b" }));
+  assert(wsBSummary.includes("common"), "ws-b 摘要应包含全局技能");
+  assert(wsBSummary.includes("ws-b-only"), "ws-b 摘要应包含 ws-b 技能");
+  assert(!wsBSummary.includes("ws-a-only"), "ws-b 摘要不应包含 ws-a 技能");
+
+  return true;
+});
+
+// 47. scope 从 workspace 改为 global 时清空 workspaceId
+test("scope 切换 workspace→global 时清空 workspaceId", async () => {
+  const store = await tmpStore();
+
+  // 先创建 workspace 技能
+  await seedSkill(store, "migrate", {
+    description: "workspace 版本",
+    scope: "workspace",
+    workspaceId: "ws-old",
+  });
+
+  const wsSkill = store.get("migrate", { workspaceId: "ws-old" });
+  assert(!!wsSkill, "workspace 版本应存在");
+  assert(wsSkill!.scope === "workspace", "应为 workspace scope");
+  assert(wsSkill!.workspaceId === "ws-old", "workspaceId 应为 ws-old");
+
+  // 改为 global
+  await store.save({
+    name: "migrate",
+    content: "# migrate\n\n改为全局",
+    description: "全局版本",
+    scope: "global",
+  });
+
+  // 全局版本应可获取
+  const globalSkill = store.get("migrate");
+  assert(!!globalSkill, "全局版本应存在");
+  assert(globalSkill!.description === "全局版本", "描述应为全局版本");
+  assert(globalSkill!.scope === "global", "scope 应为 global");
+  assert(globalSkill!.workspaceId === undefined, "workspaceId 应被清空");
+
+  // 旧的 workspace 版本仍然独立存在（不同命名空间）
+  const wsOld = store.get("migrate", { workspaceId: "ws-old" });
+  assert(!!wsOld, "旧的 workspace 版本应仍存在");
+  assert(wsOld!.description === "workspace 版本", "workspace 版本描述不变");
+  assert(wsOld!.scope === "workspace", "scope 仍为 workspace");
+
+  // 不带 workspaceId 的 get 只命中 global
+  assert(store.get("migrate")?.description === "全局版本", "不带 workspaceId 只命中 global");
+
+  return true;
+});
+
+// 48. resolveSkillGraph() 优先同 workspace 依赖
+test("resolveSkillGraph() 优先同 workspace 依赖", async () => {
+  const store = await tmpStore();
+
+  // 全局依赖
+  await seedSkill(store, "helper", { description: "全局 helper", calls: [] });
+  // workspace 专用依赖
+  await seedSkill(store, "helper", {
+    description: "ws-a helper",
+    scope: "workspace",
+    workspaceId: "ws-a",
+    calls: [],
+  });
+  // workspace 专用主技能，依赖 helper
+  await seedSkill(store, "main", {
+    description: "ws-a main",
+    calls: ["helper"],
+    scope: "workspace",
+    workspaceId: "ws-a",
+  });
+
+  // 在 ws-a 下解析依赖图
+  const graph = store.resolveSkillGraph("main", { workspaceId: "ws-a" });
+  assert(graph.cycles.length === 0, "不应有循环");
+  assert(graph.ordered.length === 2, "应包含 2 个节点");
+
+  // 应优先使用 ws-a 的 helper
+  const helperNode = graph.ordered.find(n => n.name === "helper");
+  assert(!!helperNode, "应包含 helper 依赖");
+
+  return true;
+});
+
+// 49. builtin 的 tags/antiTriggers 会被加载
+test("builtin 的 tags/antiTriggers 会被加载", async () => {
+  const store = await tmpStore();
+
+  await store.registerBuiltin({
+    name: "test-builtin-tags",
+    content: "# test\n\nbody",
+    description: "测试内置标签",
+    triggers: ["test"],
+    calls: [],
+    tags: ["typescript", "testing"],
+    antiTriggers: ["danger", "unsafe"],
+  });
+
+  const skill = store.get("test-builtin-tags");
+  assert(!!skill, "技能应存在");
+  assert(skill!.tags.join(",") === "typescript,testing", "tags 应被正确加载");
+  assert(skill!.antiTriggers.join(",") === "danger,unsafe", "antiTriggers 应被正确加载");
+  assert(skill!.builtin === true, "应标记为 builtin");
+
   return true;
 });
 
