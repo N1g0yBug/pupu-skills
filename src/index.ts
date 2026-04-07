@@ -672,6 +672,10 @@ server.tool(
     if (skillName) {
       const skill = store.get(skillName, { workspaceId });
       if (skill) {
+        // 用技能自身的 scope/workspaceId，避免 fallback 到同名其他 scope
+        const skillOpts: { workspaceId?: string } = skill.scope === "workspace"
+          ? { workspaceId: skill.workspaceId }
+          : {};
         await store.recordExecution(skillName, {
           timestamp: new Date().toISOString(),
           success,
@@ -679,7 +683,7 @@ server.tool(
           summary,
           error: success ? null : (error ?? "执行失败"),
           context: task,
-        }, { workspaceId });
+        }, skillOpts);
       }
     }
 
@@ -695,9 +699,12 @@ server.tool(
       if (!skill) {
         reason = `技能 ${skillName} 不存在。`;
       } else {
-        const recentHistory = store.getHistory(skillName, 5, { workspaceId });
+        const skillOpts: { workspaceId?: string } = skill.scope === "workspace"
+          ? { workspaceId: skill.workspaceId }
+          : {};
+        const recentHistory = store.getHistory(skillName, 5, skillOpts);
         const recentFails = recentHistory.filter(h => !h.success).length;
-        const lastExec = store.getLastExecution(skillName, { workspaceId });
+        const lastExec = store.getLastExecution(skillName, skillOpts);
 
         if (recentFails >= 2 || (lastExec && !lastExec.success)) {
           action = "improve_existing";
