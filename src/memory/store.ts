@@ -303,13 +303,22 @@ export class SkillStore {
         skills[name] = normalizeSkillRecord(value, repoDir);
       }
 
-      data = {
-        version: 2,
-        skills,
-      };
-    } catch {
-      data = { version: 2, skills: {} };
-      logger.info("已初始化新技能存储", { path: storePath });
+      data = { version: 2, skills };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        data = { version: 2, skills: {} };
+        logger.info("已初始化新技能存储", { path: storePath });
+      } else {
+        logger.error("技能存储读取/解析失败，已备份并初始化空存储", { path: storePath, error: String(error) });
+        try {
+          const { renameSync } = await import("node:fs");
+          renameSync(storePath, `${storePath}.bak.${Date.now()}`);
+        } catch {
+          // 备份失败不阻塞启动
+        }
+        data = { version: 2, skills: {} };
+      }
     }
 
     const store = new SkillStore(storePath, repoDir, data);

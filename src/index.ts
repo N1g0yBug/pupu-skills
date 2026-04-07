@@ -170,8 +170,10 @@ server.tool(
     success: z.boolean().describe("是否执行成功"),
     summary: z.string().min(1).describe("执行摘要"),
     error: z.string().optional().describe("失败时的错误信息"),
+    duration: z.number().int().min(0).default(0).describe("执行耗时（毫秒）"),
+    context: z.string().default("").describe("任务上下文描述"),
   },
-  async ({ scriptName, success, summary, error }) => {
+  async ({ scriptName, success, summary, error, duration, context }) => {
     const store = await getStore();
     const skill = store.get(scriptName);
     if (!skill) {
@@ -181,10 +183,10 @@ server.tool(
     await store.recordExecution(scriptName, {
       timestamp: new Date().toISOString(),
       success,
-      duration: 0,
+      duration,
       summary,
       error: success ? null : (error ?? "执行失败"),
-      context: summary,
+      context: context || summary,
     });
 
     const updated = store.get(scriptName);
@@ -473,6 +475,20 @@ server.tool(
       );
     }
 
+    if (result === "failure") {
+      return ok(
+        [
+          "自动学习结果",
+          `任务类型：${taskType}`,
+          `结果：失败`,
+          "",
+          "本次任务失败且无类似技能，不建议直接生成新技能。",
+          "请先调用 pupu_reflect 分析失败原因，确认方法可行后再用 pupu_write 创建技能。",
+        ].join("\n"),
+        store
+      );
+    }
+
     const skillName = taskType
       .toLowerCase()
       .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
@@ -511,7 +527,7 @@ server.tool(
       [
         "自动学习结果",
         `任务类型：${taskType}`,
-        `结果：${result === "success" ? "成功" : "失败"}`,
+        `结果：成功`,
         "",
         "未找到类似技能，建议创建新技能：",
         `名称：${skillName}`,
