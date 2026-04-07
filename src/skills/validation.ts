@@ -28,11 +28,10 @@ const WINDOWS_RESERVED_NAMES = new Set([
  * Keep skill names filesystem-safe without forcing ASCII-only slugs.
  */
 export function isSafeSkillName(name: string): boolean {
-  const trimmed = name.trim();
-  if (!trimmed) return false;
-  if (trimmed === "." || trimmed === "..") return false;
-  if (trimmed.endsWith(".") || trimmed.endsWith(" ")) return false;
-  if (INVALID_SKILL_NAME_CHARS.test(trimmed)) return false;
-  if (WINDOWS_RESERVED_NAMES.has(trimmed.toUpperCase())) return false;
+  if (name !== name.trim()) return false;
+  if (!name) return false;
+  if (name === "." || name === "..") return false;
+  if (INVALID_SKILL_NAME_CHARS.test(name)) return false;
+  if (WINDOWS_RESERVED_NAMES.has(name.toUpperCase())) return false;
   return true;
 }
