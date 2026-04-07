@@ -77,7 +77,7 @@ server.tool(
 
 server.tool(
   "pupu_write",
-  "创建或更新技能：写入 markdown 内容并更新元数据（内置技能不可覆盖）。",
+  "创建或更新技能：写入 markdown 内容并更新元数据（内置技能不可覆盖）。注意：更改 scope 会创建同名技能的新作用域版本，不会删除原版本。",
   {
     scriptName: z
       .string()

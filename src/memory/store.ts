@@ -353,6 +353,20 @@ function normalizeSkillRecord(input: LegacySkillRecord, repoDir: string): SkillR
   return normalized;
 }
 
+/**
+ * 获取可见技能列表。
+ * - 有 workspaceId: global + 当前 workspace
+ * - 无 workspaceId: 只返回 global
+ */
+function getVisibleSkills(all: SkillRecord[], options?: SkillOptions): SkillRecord[] {
+  if (options?.workspaceId) {
+    return all.filter(
+      s => s.scope === "global" || s.workspaceId === options.workspaceId
+    );
+  }
+  return all.filter(s => s.scope === "global");
+}
+
 // ── SkillStore ─────────────────────────────────────────────────────────
 
 export class SkillStore {
@@ -433,15 +447,12 @@ export class SkillStore {
   }
 
   /**
-   * 列出技能。
-   * - 有 workspaceId: 只返回 global + 当前 workspace 的技能
-   * - 无 workspaceId: 返回所有技能（向后兼容）
+   * 列出可见技能。
+   * - 有 workspaceId: 返回 global + 当前 workspace 的技能
+   * - 无 workspaceId: 只返回 global 技能
    */
   list(options?: SkillOptions): SkillRecord[] {
-    const all = Object.values(this.data.skills);
-    const visible = options?.workspaceId
-      ? all.filter(s => s.scope === "global" || s.workspaceId === options.workspaceId)
-      : all;
+    const visible = getVisibleSkills(Object.values(this.data.skills), options);
 
     return visible
       .map(skill => ({
@@ -494,11 +505,7 @@ export class SkillStore {
   }
 
   getLowUtility(threshold: number, options?: SkillOptions): SkillRecord[] {
-    const visible = options?.workspaceId
-      ? Object.values(this.data.skills).filter(
-          s => s.scope === "global" || s.workspaceId === options.workspaceId
-        )
-      : Object.values(this.data.skills);
+    const visible = getVisibleSkills(Object.values(this.data.skills), options);
 
     return visible
       .filter(skill => skill.executionCount >= 2 && skill.utilityScore < threshold)
@@ -646,6 +653,8 @@ export class SkillStore {
           filePath,
           builtin: true,
           triggers: skill.triggers ?? existing.triggers,
+          tags: ("tags" in skill ? skill.tags : undefined) ?? existing.tags,
+          antiTriggers: ("antiTriggers" in skill ? skill.antiTriggers : undefined) ?? existing.antiTriggers,
           updatedAt: now,
           calls: skill.calls ?? existing.calls,
         }

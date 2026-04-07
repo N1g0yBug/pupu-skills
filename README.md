@@ -225,6 +225,7 @@ Claude 在任何交互后都能看到可用技能，不需要主动搜索。
 - 所有 MCP tool 均支持 `workspaceId` 参数，精确操作当前 workspace 的技能
 - 技能路由和摘要只展示当前 workspace 可见的技能（global + 当前 workspace）
 - 不传 `workspaceId` 时只命中 global 技能，避免歧义
+- 更改技能的 scope（如 workspace→global）会创建同名技能的新作用域版本，不会删除原版本
 
 ---
 

@@ -738,7 +738,7 @@ test("workspace 隔离 — search 按 workspaceId 过滤", async () => {
   await seedSkill(store, "ws-b-skill", { description: "B 工作区技能", scope: "workspace", workspaceId: "ws-b" });
 
   const all = store.search("*");
-  assert(all.length === 3, "无过滤时应返回全部 3 个技能");
+  assert(all.length === 1, "不带 workspaceId 时应只返回 global 技能");
 
   const wsA = store.search("*", { workspaceId: "ws-a" });
   assert(wsA.length === 2, "ws-a 过滤应返回 2 个（global + ws-a）");
@@ -815,7 +815,7 @@ test("route workspace 加成", async () => {
     triggers: ["部署"],
   });
 
-  const result = route("帮我部署", store.list(), { workspaceId: "my-ws" });
+  const result = route("帮我部署", store.list({ workspaceId: "my-ws" }), { workspaceId: "my-ws" });
   const wsRec = result.recommendations.find(r => r.skill.name === "ws-deploy");
   const globalRec = result.recommendations.find(r => r.skill.name === "global-deploy");
 
@@ -965,7 +965,7 @@ test("同名技能不同 workspace 共存", async () => {
 
   // list 应该返回 3 个技能（1 global + 2 workspace）
   const all = store.list();
-  assert(all.length === 3, "list() 应返回全部 3 个同名但不同 workspace 的技能");
+  assert(all.length === 1, "list() 不带 workspaceId 应只返回 global 技能");
 
   // list 带 workspaceId 应过滤
   const wsAList = store.list({ workspaceId: "ws-a" });
