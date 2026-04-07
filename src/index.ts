@@ -60,10 +60,11 @@ server.tool(
   "搜索技能库：按名称、描述、触发词进行模糊匹配，并返回技能列表。",
   {
     query: z.string().min(1, "query 不能为空").describe("搜索关键词"),
+    workspaceId: z.string().optional().describe("工作区ID，用于筛选工作区专属技能"),
   },
-  async ({ query }) => {
+  async ({ query, workspaceId }) => {
     const store = await getStore();
-    const skills = store.search(query);
+    const skills = store.search(query, { workspaceId });
 
     if (skills.length === 0) {
       return ok(`未找到与「${query}」匹配的技能。可使用 pupu_write 创建新技能。`, store);
@@ -90,9 +91,17 @@ server.tool(
     description: z.string().min(1, "description 不能为空").describe("技能描述"),
     triggers: z.array(z.string()).default([]).describe("触发词列表"),
     calls: z.array(z.string()).default([]).describe("依赖调用的技能列表"),
+    tags: z.array(z.string()).default([]).describe("技能标签"),
+    antiTriggers: z.array(z.string()).default([]).describe("反触发词列表，匹配时降低路由分数"),
+    scope: z.enum(["global", "workspace"]).default("global").describe("技能作用域"),
+    workspaceId: z.string().optional().describe("工作区ID（scope为workspace时必填）"),
   },
-  async ({ scriptName, content, description, triggers, calls }) => {
+  async ({ scriptName, content, description, triggers, calls, tags, antiTriggers, scope, workspaceId }) => {
     const store = await getStore();
+
+    if (scope === "workspace" && !workspaceId) {
+      return fail("scope 为 workspace 时必须提供 workspaceId", store);
+    }
     const existing = store.get(scriptName);
 
     if (existing?.builtin) {
@@ -110,6 +119,10 @@ server.tool(
         description,
         triggers,
         calls,
+        tags,
+        antiTriggers,
+        scope,
+        workspaceId,
       });
 
       const triggerText = record.triggers.length > 0 ? record.triggers.join("、") : "无";
@@ -132,7 +145,7 @@ server.tool(
 
 server.tool(
   "pupu_execute",
-  "执行技能：读取技能 markdown 并返回执行指令（不运行任何子进程）。",
+  "执行技能：读取技能 markdown 并返回执行指令（不运行任何子进程）。如有依赖技能，一并返回。",
   {
     scriptName: z.string().min(1).describe("技能名称"),
     context: z.string().default("").describe("任务上下文描述"),
@@ -144,15 +157,45 @@ server.tool(
       return fail(`技能不存在：${scriptName}`, store);
     }
 
+    const graph = store.resolveSkillGraph(scriptName);
+
+    if (graph.cycles.length > 0) {
+      return fail(`技能调用链存在循环依赖：${graph.cycles.join(" -> ")}`, store);
+    }
+
     try {
-      const markdown = await store.readSkillContent(scriptName);
+      if (graph.ordered.length <= 1) {
+        const markdown = await store.readSkillContent(scriptName);
+        const text = [
+          `═══ 技能: ${scriptName} ═══`,
+          markdown,
+          "═══",
+          context.trim() ? `当前任务上下文：${context.trim()}` : "当前任务上下文：未提供",
+          "请按照以上技能文档的步骤执行当前任务。",
+          "完成后调用 pupu_after_task 或 pupu_report 汇报结果（success/failure）。",
+        ].join("\n");
+        return ok(text, store);
+      }
+
+      const sections: string[] = [];
+      for (const node of graph.ordered) {
+        if (node.name === scriptName) continue;
+        const depMd = await store.readSkillContent(node.name);
+        sections.push(`═══ 依赖技能 [${node.depth}]: ${node.name} ═══\n${depMd}\n═══`);
+      }
+
+      const mainMd = await store.readSkillContent(scriptName);
       const text = [
-        `═══ 技能: ${scriptName} ═══`,
-        markdown,
+        `═══ 主技能: ${scriptName} ═══`,
+        mainMd,
         "═══",
+        "",
+        "【依赖技能链（按执行顺序）】",
+        ...sections,
+        "",
         context.trim() ? `当前任务上下文：${context.trim()}` : "当前任务上下文：未提供",
-        "请按照以上技能文档的步骤执行当前任务。",
-        "完成后调用 pupu_report 汇报结果（success/failure）。",
+        "请先阅读依赖技能，然后按主技能文档执行当前任务。",
+        "完成后调用 pupu_after_task 或 pupu_report 汇报结果（success/failure）。",
       ].join("\n");
       return ok(text, store);
     } catch (error) {
@@ -247,12 +290,24 @@ server.tool(
     const hasTriggerSection = /##\s*触发条件/.test(markdown);
     const hasStepSection = /##\s*执行步骤/.test(markdown);
     const hasNoteSection = /##\s*注意事项/.test(markdown);
+    const hasApplicableSection = /##\s*适用场景/.test(markdown);
+    const hasNotApplicableSection = /##\s*不适用场景/.test(markdown);
+    const hasPrerequisiteSection = /##\s*前置条件/.test(markdown);
+    const hasSuccessCriteriaSection = /##\s*成功判定/.test(markdown);
+    const hasFailureBranchSection = /##\s*失败分支/.test(markdown);
+    const hasExampleSection = /##\s*示例任务/.test(markdown);
 
     const suggestions: string[] = [];
-    if (!hasTriggerSection) suggestions.push("补充“触发条件”章节，缩小误触发范围。");
-    if (!hasStepSection) suggestions.push("补充“执行步骤”章节，并将步骤改为可验证的顺序动作。");
-    if (!hasNoteSection) suggestions.push("补充“注意事项”章节，提前声明前置条件和失败兜底策略。");
-    if (sameErrorCount >= 2) suggestions.push("同类错误重复出现，建议在步骤中加入“失败分支处理”与“重试条件”。");
+    if (!hasTriggerSection) suggestions.push("补充\"触发条件\"章节，缩小误触发范围。");
+    if (!hasStepSection) suggestions.push("补充\"执行步骤\"章节，并将步骤改为可验证的顺序动作。");
+    if (!hasNoteSection) suggestions.push("补充\"注意事项\"章节，提前声明前置条件和失败兜底策略。");
+    if (!hasApplicableSection) suggestions.push('补充"适用场景"章节，明确技能的最佳使用场景。');
+    if (!hasNotApplicableSection) suggestions.push('补充"不适用场景"章节，避免误用。');
+    if (!hasPrerequisiteSection) suggestions.push('补充"前置条件"章节，列出执行前必须满足的条件。');
+    if (!hasSuccessCriteriaSection) suggestions.push('补充"成功判定"章节，定义可验证的完成标准。');
+    if (!hasFailureBranchSection) suggestions.push('补充"失败分支"章节，为每种失败情况定义应对策略。');
+    if (!hasExampleSection) suggestions.push('补充"示例任务"章节，提供典型输入/输出示例。');
+    if (sameErrorCount >= 2) suggestions.push('同类错误重复出现，建议在步骤中加入"失败分支处理"与"重试条件"。');
     if (failCount > successCount) suggestions.push("近期失败多于成功，建议重写关键步骤并缩短单次执行链路。");
     if (suggestions.length === 0) suggestions.push("建议重点优化执行步骤中的命令顺序与输入校验。");
 
@@ -269,8 +324,8 @@ server.tool(
       ...suggestions.map(item => `- ${item}`),
       "",
       "【建议优先改动位置】",
-      hasStepSection ? "- 优先修改“执行步骤”章节，增加前置检查、失败回退与结果验收。" : "- 先新增“执行步骤”章节。",
-      hasTriggerSection ? "- 调整“触发条件”章节，避免任务不匹配时误用该技能。" : "- 新增“触发条件”章节。",
+      hasStepSection ? "- 优先修改\"执行步骤\"章节，增加前置检查、失败回退与结果验收。" : "- 先新增\"执行步骤\"章节。",
+      hasTriggerSection ? "- 调整\"触发条件\"章节，避免任务不匹配时误用该技能。" : "- 新增\"触发条件\"章节。",
       "- 如需落地改动，请调用 pupu_write 更新 markdown。",
     ].join("\n");
 
@@ -392,11 +447,12 @@ server.tool(
   "技能路由：根据任务描述推荐技能，并给出置信度与匹配原因。",
   {
     task: z.string().min(1).describe("任务描述"),
+    workspaceId: z.string().optional().describe("工作区ID，同工作区技能优先"),
   },
-  async ({ task }) => {
+  async ({ task, workspaceId }) => {
     const store = await getStore();
     const skills = store.list();
-    const result = route(task, skills);
+    const result = route(task, skills, { workspaceId });
 
     if (result.recommendations.length === 0) {
       return ok(
@@ -507,8 +563,26 @@ server.tool(
       "## 触发条件",
       `当遇到${taskType}相关任务时使用此技能。`,
       "",
+      "## 适用场景",
+      `- ${taskType}`,
+      "",
+      "## 不适用场景",
+      "- 待补充",
+      "",
+      "## 前置条件",
+      "- 待补充",
+      "",
       "## 执行步骤",
       ...(steps.length > 0 ? steps.map((step, index) => `${index + 1}. ${step}`) : ["1. 根据当前任务补充执行步骤。"]),
+      "",
+      "## 成功判定",
+      "- 待补充",
+      "",
+      "## 失败分支",
+      "- 待补充",
+      "",
+      "## 示例任务",
+      `- ${context.slice(0, 80)}`,
       "",
       "## 注意事项",
       `- 来源任务上下文：${context.slice(0, 100)}`,
@@ -543,6 +617,131 @@ server.tool(
       ].join("\n"),
       store
     );
+  }
+);
+
+server.tool(
+  "pupu_after_task",
+  "任务后处理：记录执行结果并自动判断是否需要创建或优化技能。整合了 report + learn 的闭环。",
+  {
+    workspaceId: z.string().optional().describe("工作区ID"),
+    skillName: z.string().optional().describe("使用的技能名称（如有）"),
+    task: z.string().min(1).describe("任务描述"),
+    success: z.boolean().describe("是否成功"),
+    summary: z.string().min(1).describe("执行摘要"),
+    error: z.string().optional().describe("失败时的错误信息"),
+    approach: z.string().default("").describe("采用的解决方法"),
+    duration: z.number().int().min(0).default(0).describe("执行耗时（毫秒）"),
+    resultArtifacts: z.array(z.string()).default([]).describe("产出的文件或资源路径"),
+  },
+  async ({ workspaceId, skillName, task, success, summary, error, approach, duration, resultArtifacts: _resultArtifacts }) => {
+    const store = await getStore();
+
+    if (skillName) {
+      const skill = store.get(skillName);
+      if (skill) {
+        await store.recordExecution(skillName, {
+          timestamp: new Date().toISOString(),
+          success,
+          duration,
+          summary,
+          error: success ? null : (error ?? "执行失败"),
+          context: task,
+        });
+      }
+    }
+
+    let action = "none";
+    let targetSkill: string | undefined;
+    let draft: string | undefined;
+    let reason: string;
+
+    if (!success && !skillName) {
+      reason = "任务失败且未关联技能，不建议创建新技能。";
+    } else if (skillName) {
+      const skill = store.get(skillName);
+      if (!skill) {
+        reason = `技能 ${skillName} 不存在。`;
+      } else {
+        const recentHistory = store.getHistory(skillName, 5);
+        const recentFails = recentHistory.filter(h => !h.success).length;
+        const lastExec = store.getLastExecution(skillName);
+
+        if (recentFails >= 2 || (lastExec && !lastExec.success)) {
+          action = "improve_existing";
+          targetSkill = skillName;
+          reason = recentFails >= 2
+            ? `技能 ${skillName} 近期失败率较高 (${recentFails}/5)，建议优化。`
+            : `技能 ${skillName} 最近一次执行失败，建议分析原因。`;
+        } else {
+          reason = `技能 ${skillName} 执行正常，无需优化。`;
+        }
+      }
+    } else {
+      const similarSkills = store.search(`${task} ${approach}`, { workspaceId });
+      if (similarSkills.length > 0) {
+        targetSkill = similarSkills[0].name;
+        reason = `已有类似技能：${similarSkills[0].name}，无需创建新技能。`;
+      } else {
+        action = "create_draft";
+        const nameDraft = task
+          .toLowerCase()
+          .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
+          .replace(/-+/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 40);
+
+        const steps = approach.split(/[;\n]/).map(s => s.trim()).filter(Boolean);
+
+        draft = [
+          `# ${nameDraft}`,
+          "",
+          "## 触发条件",
+          `当遇到${task}相关任务时使用此技能。`,
+          "",
+          "## 适用场景",
+          `- ${task}`,
+          "",
+          "## 不适用场景",
+          "- 待补充",
+          "",
+          "## 前置条件",
+          "- 待补充",
+          "",
+          "## 执行步骤",
+          ...(steps.length > 0 ? steps.map((s, i) => `${i + 1}. ${s}`) : ["1. 根据当前任务补充执行步骤。"]),
+          "",
+          "## 成功判定",
+          "- 待补充",
+          "",
+          "## 失败分支",
+          "- 待补充",
+          "",
+          "## 示例任务",
+          `- ${summary.slice(0, 80)}`,
+          "",
+          "## 注意事项",
+          `- 来源任务上下文：${summary.slice(0, 100)}`,
+          "",
+          "## 改进记录",
+          "- v1: 由 pupu_after_task 自动生成，需根据实际使用情况优化",
+        ].join("\n");
+
+        reason = "未找到类似技能，已生成技能草稿。";
+      }
+    }
+
+    const lines = [
+      `═══ 任务后处理结果 ═══`,
+      `动作：${action}`,
+      targetSkill ? `目标技能：${targetSkill}` : null,
+      `原因：${reason}`,
+      action === "create_draft" ? "\n技能草稿：\n```markdown\n" + draft + "\n```" : null,
+      action === "create_draft" ? "\n如需保存草稿，请调用 pupu_write 将上述内容作为 content 传入。" : null,
+      action === "improve_existing" ? "\n请调用 pupu_reflect 获取改进建议，再用 pupu_write 更新技能。" : null,
+    ].filter(Boolean).join("\n");
+
+    return ok(lines, store);
   }
 );
 

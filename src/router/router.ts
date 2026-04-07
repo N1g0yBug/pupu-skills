@@ -12,12 +12,17 @@ export interface RouteResponse {
   summary: string;
 }
 
+export interface RouteOptions {
+  workspaceId?: string;
+}
+
 interface ScoredRouteResult extends RouteResult {
   hasTaskSignal: boolean;
 }
 
 const MAX_RECOMMENDATIONS = 8;
 const MIN_CONFIDENCE = 15;
+const GENERIC_NAMES = new Set(["filesystem", "grep", "web-search"]);
 
 /** 将文本归一化后分词：英文按空白切分，中文按单字+双字切分 */
 function tokenize(text: string): string[] {
@@ -130,6 +135,20 @@ function scoreSkill(task: string, skill: SkillRecord): ScoredRouteResult {
     reasons.push(`触发词命中${triggerHits}个(+${triggerScore})`);
   }
 
+  // 标签匹配：每个 +3，最多 +15
+  const tags = skill.tags ?? [];
+  let tagHits = 0;
+  for (const tag of tags) {
+    const tagTokens = tokenize(tag);
+    if (tagTokens.some(token => taskTokenSet.has(token))) tagHits++;
+  }
+  if (tagHits > 0) {
+    const tagScore = Math.min(15, tagHits * 3);
+    signalScore += tagScore;
+    hasTaskSignal = true;
+    reasons.push(`标签命中${tagHits}个(+${tagScore})`);
+  }
+
   const utilityBonus = Math.max(0, Math.min(20, skill.utilityScore * 0.2));
   const score = signalScore + utilityBonus;
   reasons.push(`效用分加成(+${Math.round(utilityBonus)})`);
@@ -143,7 +162,11 @@ function scoreSkill(task: string, skill: SkillRecord): ScoredRouteResult {
   };
 }
 
-export function route(task: string, skills: SkillRecord[]): RouteResponse {
+export function route(task: string, skills: SkillRecord[], options?: RouteOptions): RouteResponse {
+  const taskTokens = tokenize(task);
+  const taskTokenSet = new Set(taskTokens);
+
+  // Phase 1: 召回
   const ranked = skills
     .map(skill => scoreSkill(task, skill))
     .sort((a, b) => {
@@ -157,7 +180,67 @@ export function route(task: string, skills: SkillRecord[]): RouteResponse {
     })
     .slice(0, MAX_RECOMMENDATIONS);
 
-  const recommendations = ranked
+  // Phase 2: 重排
+  const reranked = ranked.map(item => {
+    let bonus = 0;
+    const rerankReasons: string[] = [];
+
+    // 同工作区加分: +15
+    if (options?.workspaceId && item.skill.workspaceId === options.workspaceId) {
+      bonus += 15;
+      rerankReasons.push("同工作区匹配(+15)");
+    }
+
+    // 反触发词惩罚: 每个 -20，最多 -60
+    const antiTriggers = item.skill.antiTriggers ?? [];
+    let antiHits = 0;
+    for (const anti of antiTriggers) {
+      const antiTokens = tokenize(anti);
+      if (antiTokens.some(token => taskTokenSet.has(token))) antiHits++;
+    }
+    if (antiHits > 0) {
+      const penalty = Math.min(60, antiHits * 20);
+      bonus -= penalty;
+      rerankReasons.push(`反触发词命中${antiHits}个(-${penalty})`);
+    }
+
+    // 通用内置技能降权: -10
+    if (GENERIC_NAMES.has(item.skill.name) && item.skill.builtin) {
+      bonus -= 10;
+      rerankReasons.push("通用内置技能降权(-10)");
+    }
+
+    // 多步骤编排技能加成: +8
+    if (item.skill.calls.length > 0) {
+      bonus += 8;
+      rerankReasons.push("多步骤编排技能加成(+8)");
+    }
+
+    // 同工作区近期成功加分: +5
+    if (options?.workspaceId && item.skill.workspaceId === options.workspaceId) {
+      const recentHistory = item.skill.history.slice(-5);
+      const recentSuccesses = recentHistory.filter(h => h.success).length;
+      if (recentSuccesses >= 3) {
+        bonus += 5;
+        rerankReasons.push(`同工作区近期成功(${recentSuccesses}/5)(+5)`);
+      }
+    }
+
+    return {
+      ...item,
+      confidence: clampScore(item.confidence + bonus),
+      matchReason: item.matchReason + (rerankReasons.length > 0 ? "；" + rerankReasons.join("；") : ""),
+    };
+  });
+
+  // 重排后重新排序
+  reranked.sort((a, b) => {
+    if (a.hasTaskSignal !== b.hasTaskSignal) return Number(b.hasTaskSignal) - Number(a.hasTaskSignal);
+    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+    return b.skill.utilityScore - a.skill.utilityScore;
+  });
+
+  const recommendations = reranked
     .filter(item => item.hasTaskSignal && item.confidence >= MIN_CONFIDENCE)
     .map(({ hasTaskSignal: _hasTaskSignal, ...item }) => item);
 

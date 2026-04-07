@@ -1,0 +1,14 @@
+{
+  "name": "pupu-skills-marketplace",
+  "owner": {
+    "name": "pupu-skills"
+  },
+  "plugins": [
+    {
+      "name": "pupu-skills",
+      "source": "./",
+      "category": "development",
+      "description": "Claude Code 技能记忆插件"
+    }
+  ]
+}

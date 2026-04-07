@@ -46,6 +46,10 @@ async function seedSkill(
     description?: string;
     triggers?: string[];
     calls?: string[];
+    tags?: string[];
+    antiTriggers?: string[];
+    scope?: "global" | "workspace";
+    workspaceId?: string;
   },
 ) {
   return store.save({
@@ -54,6 +58,10 @@ async function seedSkill(
     description: options?.description ?? `${name} description`,
     triggers: options?.triggers ?? [],
     calls: options?.calls ?? [],
+    tags: options?.tags,
+    antiTriggers: options?.antiTriggers,
+    scope: options?.scope,
+    workspaceId: options?.workspaceId,
   });
 }
 
@@ -718,6 +726,211 @@ test("save 保留触发词", async () => {
   assert(skill?.triggers.length === 3, "内存中触发词数量应正确");
   const md = await store.readSkillContent("trigger-keep");
   assert(md.includes('triggers: ["alpha beta","中文触发","deploy"]'), "文件中应保留触发词");
+  return true;
+});
+
+// 34. workspace 隔离 — search 按 workspaceId 过滤
+test("workspace 隔离 — search 按 workspaceId 过滤", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "global-skill", { description: "全局技能" });
+  await seedSkill(store, "ws-a-skill", { description: "A 工作区技能", scope: "workspace", workspaceId: "ws-a" });
+  await seedSkill(store, "ws-b-skill", { description: "B 工作区技能", scope: "workspace", workspaceId: "ws-b" });
+
+  const all = store.search("*");
+  assert(all.length === 3, "无过滤时应返回全部 3 个技能");
+
+  const wsA = store.search("*", { workspaceId: "ws-a" });
+  assert(wsA.length === 2, "ws-a 过滤应返回 2 个（global + ws-a）");
+  assert(wsA.some(s => s.name === "global-skill"), "应包含全局技能");
+  assert(wsA.some(s => s.name === "ws-a-skill"), "应包含 ws-a 技能");
+  assert(!wsA.some(s => s.name === "ws-b-skill"), "不应包含 ws-b 技能");
+
+  const wsB = store.search("*", { workspaceId: "ws-b" });
+  assert(wsB.length === 2, "ws-b 过滤应返回 2 个");
+  assert(!wsB.some(s => s.name === "ws-a-skill"), "不应包含 ws-a 技能");
+  return true;
+});
+
+// 35. resolveSkillGraph 线性链
+test("resolveSkillGraph 线性链", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "c", { description: "C", calls: [] });
+  await seedSkill(store, "b", { description: "B", calls: ["c"] });
+  await seedSkill(store, "a", { description: "A", calls: ["b"] });
+
+  const graph = store.resolveSkillGraph("a");
+  assert(graph.cycles.length === 0, "线性链不应有循环");
+  assert(graph.ordered.length === 3, "应包含 3 个节点");
+  assert(graph.ordered[0].name === "c", "第一个应是叶子节点 c");
+  assert(graph.ordered[1].name === "b", "第二个应是 b");
+  assert(graph.ordered[2].name === "a", "第三个应是根节点 a");
+  return true;
+});
+
+// 36. resolveSkillGraph 循环检测
+test("resolveSkillGraph 循环检测", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "x", { description: "X", calls: ["y"] });
+  await seedSkill(store, "y", { description: "Y", calls: ["x"] });
+
+  const graph = store.resolveSkillGraph("x");
+  assert(graph.cycles.length > 0, "循环链应检测到循环");
+  return true;
+});
+
+// 37. route antiTriggers 惩罚
+test("route antiTriggers 惩罚", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "deploy-tool", {
+    description: "部署工具",
+    triggers: ["部署"],
+    antiTriggers: ["测试", "test"],
+  });
+
+  const resultGood = route("帮我部署到生产环境", store.list());
+  const resultBad = route("帮我测试部署", store.list());
+
+  const goodRec = resultGood.recommendations.find(r => r.skill.name === "deploy-tool");
+  const badRec = resultBad.recommendations.find(r => r.skill.name === "deploy-tool");
+
+  assert(!!goodRec, "正常任务应命中 deploy-tool");
+  if (badRec && goodRec) {
+    assert(goodRec.confidence > badRec.confidence, "antiTriggers 命中后置信度应降低");
+  }
+  return true;
+});
+
+// 38. route workspace 加成
+test("route workspace 加成", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "ws-deploy", {
+    description: "部署",
+    triggers: ["部署"],
+    scope: "workspace",
+    workspaceId: "my-ws",
+  });
+  await seedSkill(store, "global-deploy", {
+    description: "部署",
+    triggers: ["部署"],
+  });
+
+  const result = route("帮我部署", store.list(), { workspaceId: "my-ws" });
+  const wsRec = result.recommendations.find(r => r.skill.name === "ws-deploy");
+  const globalRec = result.recommendations.find(r => r.skill.name === "global-deploy");
+
+  assert(!!wsRec, "应命中 ws-deploy");
+  assert(!!globalRec, "应命中 global-deploy");
+  assert(wsRec!.confidence > globalRec!.confidence, "同工作区技能置信度应更高");
+  return true;
+});
+
+// 39. reflect 新章节检测
+test("reflect 新章节检测（regex 测试）", async () => {
+  const markdown = [
+    "# test-skill",
+    "",
+    "## 触发条件",
+    "- 当需要时",
+    "",
+    "## 执行步骤",
+    "1. 做事",
+    "",
+    "## 注意事项",
+    "- 注意",
+  ].join("\n");
+
+  assert(/##\s*适用场景/.test(markdown) === false, "不应检测到适用场景");
+  assert(/##\s*前置条件/.test(markdown) === false, "不应检测到前置条件");
+  assert(/##\s*成功判定/.test(markdown) === false, "不应检测到成功判定");
+  assert(/##\s*失败分支/.test(markdown) === false, "不应检测到失败分支");
+  assert(/##\s*示例任务/.test(markdown) === false, "不应检测到示例任务");
+  assert(/##\s*触发条件/.test(markdown) === true, "应检测到触发条件");
+  assert(/##\s*执行步骤/.test(markdown) === true, "应检测到执行步骤");
+  assert(/##\s*注意事项/.test(markdown) === true, "应检测到注意事项");
+
+  const fullMarkdown = markdown + "\n\n## 适用场景\n- 场景1\n\n## 成功判定\n- 完成\n";
+  assert(/##\s*适用场景/.test(fullMarkdown) === true, "加入后应检测到适用场景");
+  assert(/##\s*成功判定/.test(fullMarkdown) === true, "加入后应检测到成功判定");
+  return true;
+});
+
+// 40. frontmatter 解析 tags/antiTriggers/scope/workspaceId
+test("frontmatter 解析 tags/antiTriggers/scope/workspaceId", async () => {
+  const parsed = parseSkillFrontmatter(`---
+name: "test-fm"
+description: "frontmatter 新字段测试"
+triggers: ["a"]
+calls: []
+tags: ["typescript", "mcp"]
+antiTriggers: ["danger", "unsafe"]
+scope: workspace
+workspaceId: "proj-123"
+---
+
+# test-fm
+
+正文内容`);
+
+  assert(parsed.meta.name === "test-fm", "name 应正确");
+  assert(parsed.meta.tags?.join(",") === "typescript,mcp", "tags 应正确");
+  assert(parsed.meta.antiTriggers?.join(",") === "danger,unsafe", "antiTriggers 应正确");
+  assert(parsed.meta.scope === "workspace", "scope 应为 workspace");
+  assert(parsed.meta.workspaceId === "proj-123", "workspaceId 应正确");
+  assert(parsed.body.includes("正文内容"), "正文应保留");
+  return true;
+});
+
+// 41. 旧版 skills.json 无新字段时兼容
+test("旧版 skills.json 无新字段时兼容", async () => {
+  counter++;
+  const storePath = join(tmpDir, `skills_${counter}.json`);
+  const repoDir = join(tmpDir, `repo_${counter}`);
+
+  // 手动写入只有旧字段的 skills.json
+  const { writeFileSync: writeSync, mkdirSync } = await import("node:fs");
+  mkdirSync(repoDir, { recursive: true });
+  const legacyData = {
+    version: 1,
+    skills: {
+      "old-skill": {
+        name: "old-skill",
+        description: "旧版技能",
+        filePath: join(repoDir, "old-skill.md"),
+        triggers: ["old"],
+        executionCount: 5,
+        successCount: 3,
+        history: [],
+      },
+    },
+  };
+  writeSync(storePath, JSON.stringify(legacyData));
+
+  const store = await SkillStore.create({ storePath, repoDir });
+  const skill = store.get("old-skill");
+  assert(!!skill, "旧版技能应可读取");
+  assert(skill!.tags.length === 0, "默认 tags 应为空数组");
+  assert(skill!.antiTriggers.length === 0, "默认 antiTriggers 应为空数组");
+  assert(skill!.scope === "global", "默认 scope 应为 global");
+  assert(skill!.workspaceId === undefined, "默认 workspaceId 应为 undefined");
+  assert(skill!.executionCount === 5, "旧字段 executionCount 应保留");
+  return true;
+});
+
+// 42. after_task 成功无关联技能 — 搜索匹配
+test("after_task 成功无关联技能时搜索类似", async () => {
+  const store = await tmpStore();
+  await seedSkill(store, "git-commit", {
+    description: "Git 提交代码",
+    triggers: ["提交", "commit"],
+  });
+
+  // 模拟 after_task 的搜索逻辑
+  const task = "帮我提交代码到 git";
+  const approach = "git add + git commit";
+  const similarSkills = store.search(`${task} ${approach}`);
+
+  assert(similarSkills.length > 0, "应搜索到类似技能");
+  assert(similarSkills[0].name === "git-commit", "应匹配到 git-commit");
   return true;
 });
 

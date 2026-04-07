@@ -34,6 +34,10 @@ export interface SkillRecord {
   filePath: string;
   builtin: boolean;
   triggers: string[];
+  tags: string[];
+  antiTriggers: string[];
+  scope: "global" | "workspace";
+  workspaceId?: string;
   createdAt: string;
   updatedAt: string;
   executionCount: number;
@@ -55,6 +59,10 @@ interface LegacySkillRecord {
   filePath: string;
   builtin?: boolean;
   triggers?: string[];
+  tags?: string[];
+  antiTriggers?: string[];
+  scope?: "global" | "workspace";
+  workspaceId?: string;
   createdAt?: string;
   updatedAt?: string;
   executionCount?: number;
@@ -71,6 +79,10 @@ type SaveInput = {
   description: string;
   triggers?: string[];
   calls?: string[];
+  tags?: string[];
+  antiTriggers?: string[];
+  scope?: "global" | "workspace";
+  workspaceId?: string;
 };
 
 type SaveCompatInput = SaveInput & {
@@ -83,6 +95,10 @@ type SaveLegacyInput = {
   description: string;
   triggers?: string[];
   calls?: string[];
+  tags?: string[];
+  antiTriggers?: string[];
+  scope?: "global" | "workspace";
+  workspaceId?: string;
 };
 
 type BuiltinInput = {
@@ -91,6 +107,8 @@ type BuiltinInput = {
   description: string;
   triggers?: string[];
   calls?: string[];
+  tags?: string[];
+  antiTriggers?: string[];
 };
 
 type BuiltinLegacyInput = {
@@ -194,17 +212,32 @@ function toYamlArray(values: string[]): string {
 }
 
 function buildFrontmatter(record: SkillRecord): string {
-  return [
+  const lines = [
     "---",
     `name: ${toYamlScalar(record.name)}`,
     `description: ${toYamlScalar(record.description)}`,
     `triggers: ${toYamlArray(record.triggers)}`,
     `calls: ${toYamlArray(record.calls)}`,
+  ];
+  if (record.tags.length > 0) {
+    lines.push(`tags: ${toYamlArray(record.tags)}`);
+  }
+  if (record.antiTriggers.length > 0) {
+    lines.push(`antiTriggers: ${toYamlArray(record.antiTriggers)}`);
+  }
+  if (record.scope === "workspace") {
+    lines.push(`scope: workspace`);
+    if (record.workspaceId) {
+      lines.push(`workspaceId: ${toYamlScalar(record.workspaceId)}`);
+    }
+  }
+  lines.push(
     `utility: ${record.utilityScore}`,
     `created: ${toYamlScalar(record.createdAt)}`,
     `updated: ${toYamlScalar(record.updatedAt)}`,
     "---",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 function splitMarkdown(content: string): { frontmatter: string; body: string } {
@@ -251,6 +284,10 @@ function normalizeSkillRecord(input: LegacySkillRecord, repoDir: string): SkillR
     filePath: normalizedPath,
     builtin: input.builtin ?? false,
     triggers: sanitizeStringArray(input.triggers),
+    tags: sanitizeStringArray(input.tags),
+    antiTriggers: sanitizeStringArray(input.antiTriggers),
+    scope: input.scope ?? "global",
+    workspaceId: input.workspaceId,
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? now,
     executionCount,
@@ -331,13 +368,26 @@ export class SkillStore {
 
   list(): SkillRecord[] {
     return Object.values(this.data.skills)
-      .map(skill => ({ ...skill, history: [...skill.history], triggers: [...skill.triggers], calls: [...skill.calls] }))
+      .map(skill => ({
+        ...skill,
+        history: [...skill.history],
+        triggers: [...skill.triggers],
+        calls: [...skill.calls],
+        tags: [...skill.tags],
+        antiTriggers: [...skill.antiTriggers],
+      }))
       .sort((a, b) => b.utilityScore - a.utilityScore);
   }
 
-  search(query: string): SkillRecord[] {
+  search(query: string, options?: { workspaceId?: string }): SkillRecord[] {
     const q = query.trim().toLowerCase();
-    if (!q || q === "*") return this.list();
+    if (!q || q === "*") {
+      const all = this.list();
+      if (options?.workspaceId) {
+        return all.filter(s => s.scope === "global" || s.workspaceId === options.workspaceId);
+      }
+      return all;
+    }
 
     const terms = q.split(/\s+/).filter(Boolean);
     const matches = Object.values(this.data.skills)
@@ -357,14 +407,34 @@ export class SkillStore {
         return b.skill.utilityScore - a.skill.utilityScore;
       });
 
-    return matches.map(item => ({ ...item.skill, history: [...item.skill.history], triggers: [...item.skill.triggers], calls: [...item.skill.calls] }));
+    let results = matches.map(item => ({
+      ...item.skill,
+      history: [...item.skill.history],
+      triggers: [...item.skill.triggers],
+      calls: [...item.skill.calls],
+      tags: [...item.skill.tags],
+      antiTriggers: [...item.skill.antiTriggers],
+    }));
+
+    if (options?.workspaceId) {
+      results = results.filter(s => s.scope === "global" || s.workspaceId === options.workspaceId);
+    }
+
+    return results;
   }
 
   getLowUtility(threshold: number): SkillRecord[] {
     return Object.values(this.data.skills)
       .filter(skill => skill.executionCount >= 2 && skill.utilityScore < threshold)
       .sort((a, b) => a.utilityScore - b.utilityScore)
-      .map(skill => ({ ...skill, history: [...skill.history], triggers: [...skill.triggers], calls: [...skill.calls] }));
+      .map(skill => ({
+        ...skill,
+        history: [...skill.history],
+        triggers: [...skill.triggers],
+        calls: [...skill.calls],
+        tags: [...skill.tags],
+        antiTriggers: [...skill.antiTriggers],
+      }));
   }
 
   getHistory(name: string, limit: number): ExecutionRecord[] {
@@ -404,6 +474,10 @@ export class SkillStore {
       filePath,
       builtin: existing?.builtin ?? false,
       triggers: skill.triggers ?? existing?.triggers ?? [],
+      tags: skill.tags ?? existing?.tags ?? [],
+      antiTriggers: skill.antiTriggers ?? existing?.antiTriggers ?? [],
+      scope: skill.scope ?? existing?.scope ?? "global",
+      workspaceId: skill.workspaceId ?? existing?.workspaceId,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       executionCount: existing?.executionCount ?? 0,
@@ -500,6 +574,9 @@ export class SkillStore {
           utilityScore: 50,
           history: [],
           calls: skill.calls ?? [],
+          tags: ("tags" in skill ? skill.tags : undefined) ?? [],
+          antiTriggers: ("antiTriggers" in skill ? skill.antiTriggers : undefined) ?? [],
+          scope: "global" as const,
         };
 
     record.utilityScore = computeUtilityScore(record);
@@ -528,6 +605,39 @@ export class SkillStore {
     const { frontmatter } = splitMarkdown(current);
     const next = frontmatter ? `${frontmatter}\n${content}` : content;
     await writeFile(skill.filePath, next, "utf-8");
+  }
+
+  resolveSkillGraph(rootName: string): { ordered: { name: string; depth: number }[]; cycles: string[] } {
+    if (!this.data.skills[rootName]) return { ordered: [], cycles: [] };
+
+    const visited = new Set<string>();
+    const inStack = new Set<string>();
+    const ordered: { name: string; depth: number }[] = [];
+    const cycles: string[] = [];
+    const allSkills = this.data.skills;
+
+    function dfs(name: string, depth: number): void {
+      if (depth > 20) return;
+      if (inStack.has(name)) {
+        cycles.push(name);
+        return;
+      }
+      if (visited.has(name)) return;
+
+      inStack.add(name);
+      const skill = allSkills[name];
+      if (skill) {
+        for (const dep of skill.calls) {
+          dfs(dep, depth + 1);
+        }
+      }
+      inStack.delete(name);
+      visited.add(name);
+      ordered.push({ name, depth });
+    }
+
+    dfs(rootName, 0);
+    return { ordered, cycles: [...new Set(cycles)] };
   }
 
   private async flush(): Promise<void> {

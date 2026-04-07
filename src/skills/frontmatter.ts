@@ -5,6 +5,10 @@ export interface ParsedSkillFrontmatter {
     description?: string;
     triggers?: string[];
     calls?: string[];
+    tags?: string[];
+    antiTriggers?: string[];
+    scope?: "global" | "workspace";
+    workspaceId?: string;
   };
 }
 
@@ -84,12 +88,13 @@ export function parseSkillFrontmatter(markdown: string): ParsedSkillFrontmatter 
       continue;
     }
 
-    if (line.startsWith("triggers:") || line.startsWith("calls:")) {
-      const target = line.startsWith("triggers:") ? "triggers" : "calls";
-      const raw = line.slice(line.indexOf(":") + 1).trim();
+    if (line.startsWith("triggers:") || line.startsWith("calls:") || line.startsWith("tags:") || line.startsWith("antiTriggers:")) {
+      const colonIdx = line.indexOf(":");
+      const target = line.slice(0, colonIdx).trim();
+      const raw = line.slice(colonIdx + 1).trim();
       const inlineValues = parseStringArray(raw);
       if (inlineValues !== null) {
-        meta[target] = inlineValues;
+        (meta as Record<string, unknown>)[target] = inlineValues;
         continue;
       }
 
@@ -108,7 +113,20 @@ export function parseSkillFrontmatter(markdown: string): ParsedSkillFrontmatter 
         cursor += 1;
       }
 
-      meta[target] = values;
+      (meta as Record<string, unknown>)[target] = values;
+      continue;
+    }
+
+    if (line.startsWith("scope:")) {
+      const raw = line.slice(6).trim().replace(/^['"]|['"]$/g, "");
+      if (raw === "workspace") meta.scope = "workspace";
+      continue;
+    }
+
+    if (line.startsWith("workspaceId:")) {
+      const raw = line.slice(12).trim().replace(/^['"]|['"]$/g, "");
+      if (raw) meta.workspaceId = raw;
+      continue;
     }
   }
 

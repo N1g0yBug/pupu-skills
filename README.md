@@ -54,7 +54,7 @@ Claude 会自动：
 1. 调用 `pupu_route` 搜索匹配的技能
 2. 如果没有 → 创建新技能 → 执行 → 存档
 3. 如果有 → 直接按技能文档执行
-4. 失败了 → `pupu_reflect` 分析原因 → 修复技能 → 重试
+4. 失败了 → `pupu_reflect` 分析原因 → 修复技能
 
 下次再说「帮我逆向这个 APK」，Claude 直接调出上次存的技能，不用从头来。
 
@@ -107,6 +107,9 @@ triggers:
   - 逆向 apk
   - 反编译
   - jadx
+tags: ["android", "security"]
+antiTriggers: ["ios", "web"]
+scope: global
 ---
 
 # analyze_apk
@@ -114,11 +117,32 @@ triggers:
 ## 触发条件
 当用户要求逆向分析 APK 文件时使用。
 
+## 适用场景
+- Android APK 逆向分析
+- 签名校验逻辑提取
+
+## 不适用场景
+- iOS 应用分析
+- Web 应用调试
+
+## 前置条件
+- jadx 已安装
+
 ## 执行步骤
 1. 确认 APK 文件路径
 2. 使用 jadx 反编译
 3. 搜索签名校验、加密函数、网络请求模式
 4. 汇总分析报告
+
+## 成功判定
+- 成功提取目标逻辑并输出分析报告
+
+## 失败分支
+- APK 加壳 → 先脱壳再分析
+- jadx 失败 → 尝试 apktool
+
+## 示例任务
+- 逆向 com.example.app 的签名校验
 ```
 
 ### 闭环流程
@@ -129,7 +153,7 @@ triggers:
 pupu_execute（读技能文档 → Claude 执行）
     ↓
 成功 → pupu_report（记录成功） → 效用分 ↑
-失败 → pupu_reflect（分析原因） → 修复技能 → 重试
+失败 → pupu_reflect（分析原因） → 修复技能
 ```
 
 ### 技能路由
@@ -176,7 +200,7 @@ Claude 在任何交互后都能看到可用技能，不需要主动搜索。
 
 ---
 
-## 10 个 MCP Tool
+## 11 个 MCP Tool
 
 | Tool | 功能 |
 |---|---|
@@ -190,6 +214,7 @@ Claude 在任何交互后都能看到可用技能，不需要主动搜索。
 | `pupu_history` | 查看执行历史 |
 | `pupu_route` | 根据任务描述推荐技能（分词 + 触发词 + 效用评分） |
 | `pupu_learn` | 自动学习，判断是否需要新建或优化技能 |
+| `pupu_after_task` | **任务收尾**：记录结果 + 自动判断学习动作（整合 report + learn） |
 
 ---
 
