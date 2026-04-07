@@ -67,7 +67,8 @@ server.tool(
     const skills = store.search(query, { workspaceId });
 
     if (skills.length === 0) {
-      return ok(`未找到与「${query}」匹配的技能。可使用 pupu_write 创建新技能。`, store, workspaceId);
+      const wsHint = workspaceId ? `（工作区: ${workspaceId}）` : "（仅 global）";
+      return ok(`未找到与「${query}」匹配的技能${wsHint}。可使用 pupu_write 创建新技能。`, store, workspaceId);
     }
 
     const lines = skills.map(formatSkillBrief).join("\n\n");
@@ -155,7 +156,8 @@ server.tool(
     const store = await getStore();
     const skill = store.get(scriptName, { workspaceId });
     if (!skill) {
-      return fail(`技能不存在：${scriptName}`, store, workspaceId);
+      const wsHint = workspaceId ? `（工作区: ${workspaceId}）` : "（仅 global）";
+      return fail(`技能不存在：${scriptName}${wsHint}`, store, workspaceId);
     }
 
     const graph = store.resolveSkillGraph(scriptName, { workspaceId });
@@ -222,7 +224,8 @@ server.tool(
     const store = await getStore();
     const skill = store.get(scriptName, { workspaceId });
     if (!skill) {
-      return fail(`技能不存在：${scriptName}`, store, workspaceId);
+      const wsHint = workspaceId ? `（工作区: ${workspaceId}）` : "（仅 global）";
+      return fail(`技能不存在：${scriptName}${wsHint}`, store, workspaceId);
     }
 
     await store.recordExecution(scriptName, {
@@ -265,7 +268,8 @@ server.tool(
     const store = await getStore();
     const skill = store.get(scriptName, { workspaceId });
     if (!skill) {
-      return fail(`技能不存在：${scriptName}`, store, workspaceId);
+      const wsHint = workspaceId ? `（工作区: ${workspaceId}）` : "（仅 global）";
+      return fail(`技能不存在：${scriptName}${wsHint}`, store, workspaceId);
     }
 
     const last = store.getLastExecution(scriptName, { workspaceId });
@@ -399,7 +403,8 @@ server.tool(
     const skill = store.get(scriptName, { workspaceId });
 
     if (!skill) {
-      return fail(`技能不存在：${scriptName}`, store, workspaceId);
+      const wsHint = workspaceId ? `（工作区: ${workspaceId}）` : "（仅 global）";
+      return fail(`技能不存在：${scriptName}${wsHint}`, store, workspaceId);
     }
     if (skill.builtin) {
       return fail(`内置技能「${scriptName}」不可删除。`, store, workspaceId);
@@ -410,7 +415,17 @@ server.tool(
       return fail(`删除失败：${scriptName}`, store, workspaceId);
     }
 
-    return ok(`技能已删除：${scriptName}`, store, workspaceId);
+    // 检查是否有同名技能残留在其他 scope/workspace
+    const siblings = store.findSameNameSkills(scriptName, skill.scope, skill.workspaceId);
+    let msg = `技能已删除：${scriptName}`;
+    if (siblings.length > 0) {
+      const siblingList = siblings.map(s =>
+        s.scope === "workspace" ? `  - workspace(${s.workspaceId})` : "  - global"
+      ).join("\n");
+      msg += `\n\n注意：同名技能仍存在于其他作用域：\n${siblingList}`;
+    }
+
+    return ok(msg, store, workspaceId);
   }
 );
 
@@ -426,7 +441,8 @@ server.tool(
     const store = await getStore();
     const skill = store.get(scriptName, { workspaceId });
     if (!skill) {
-      return fail(`技能不存在：${scriptName}`, store, workspaceId);
+      const wsHint = workspaceId ? `（工作区: ${workspaceId}）` : "（仅 global）";
+      return fail(`技能不存在：${scriptName}${wsHint}`, store, workspaceId);
     }
 
     const history = store.getHistory(scriptName, limit, { workspaceId });
@@ -498,8 +514,12 @@ server.tool(
 
     if (similarSkills.length > 0) {
       const topSkill = similarSkills[0];
-      const lastExec = store.getLastExecution(topSkill.name, { workspaceId });
-      const recentHistory = store.getHistory(topSkill.name, 5, { workspaceId });
+      // 用技能自身的 scope/workspaceId 查历史，避免串号到同名 workspace 技能
+      const skillOptions: { workspaceId?: string } = topSkill.scope === "workspace"
+        ? { workspaceId: topSkill.workspaceId }
+        : {};
+      const lastExec = store.getLastExecution(topSkill.name, skillOptions);
+      const recentHistory = store.getHistory(topSkill.name, 5, skillOptions);
       const recentFails = recentHistory.filter(item => !item.success).length;
       const needsOptimize = recentFails >= 2 || (lastExec !== null && !lastExec.success);
 

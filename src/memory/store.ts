@@ -483,6 +483,7 @@ export class SkillStore {
           skill.name,
           skill.description,
           ...skill.triggers,
+          ...skill.tags,
         ].join("\n").toLowerCase();
 
         const score = terms.reduce((acc, term) => (haystack.includes(term) ? acc + 1 : acc), 0);
@@ -538,6 +539,17 @@ export class SkillStore {
 
   getStorePath(): string {
     return this.storePath;
+  }
+
+  /**
+   * 查找同名技能在其他 scope/workspace 中的记录。
+   * 用于 delete 时提示用户是否还有残留版本。
+   */
+  findSameNameSkills(name: string, excludeScope?: string, excludeWorkspaceId?: string): SkillRecord[] {
+    return Object.values(this.data.skills).filter(s =>
+      s.name === name &&
+      !(s.scope === excludeScope && s.workspaceId === excludeWorkspaceId)
+    );
   }
 
   // 兼容旧调用：允许 code 字段
