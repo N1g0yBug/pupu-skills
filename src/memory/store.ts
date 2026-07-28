@@ -200,7 +200,7 @@ function computeUtilityScore(record: SkillRecord): number {
   if (lastExec) {
     const daysSince = (Date.now() - new Date(lastExec.timestamp).getTime()) / (1000 * 60 * 60 * 24);
     if (daysSince > 1) {
-      score -= Math.min(Math.sqrt(daysSince) * 3, 20);
+      score -= Math.min(Math.sqrt(Math.max(0, daysSince)) * 3, 20);
     }
   }
 
