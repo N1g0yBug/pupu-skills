@@ -312,7 +312,7 @@ test("getHistory", async () => {
   await seedSkill(store, "history-n");
 
   await store.recordExecution("history-n", {
-    timestamp: "2025-01-01T00:00:00.000Z",
+    timestamp: new Date(Date.now() - 3000).toISOString(),
     success: true,
     duration: 1,
     summary: "s1",
@@ -320,7 +320,7 @@ test("getHistory", async () => {
     context: "c1",
   });
   await store.recordExecution("history-n", {
-    timestamp: "2025-01-02T00:00:00.000Z",
+    timestamp: new Date(Date.now() - 2000).toISOString(),
     success: false,
     duration: 2,
     summary: "s2",
@@ -328,7 +328,7 @@ test("getHistory", async () => {
     context: "c2",
   });
   await store.recordExecution("history-n", {
-    timestamp: "2025-01-03T00:00:00.000Z",
+    timestamp: new Date(Date.now() - 1000).toISOString(),
     success: true,
     duration: 3,
     summary: "s3",
@@ -348,7 +348,7 @@ test("getLastExecution", async () => {
   const store = await tmpStore();
   await seedSkill(store, "last-one");
   await store.recordExecution("last-one", {
-    timestamp: "2025-02-01T00:00:00.000Z",
+    timestamp: new Date(Date.now() - 2000).toISOString(),
     success: true,
     duration: 1,
     summary: "first",
@@ -356,7 +356,7 @@ test("getLastExecution", async () => {
     context: "ctx",
   });
   await store.recordExecution("last-one", {
-    timestamp: "2025-02-02T00:00:00.000Z",
+    timestamp: new Date(Date.now() - 1000).toISOString(),
     success: false,
     duration: 1,
     summary: "second",
@@ -377,7 +377,7 @@ test("history 上限裁剪", async () => {
 
   for (let i = 1; i <= 55; i++) {
     await store.recordExecution("history-cap", {
-      timestamp: new Date(2025, 0, i).toISOString(),
+      timestamp: new Date(Date.now() - (60 - i) * 1000).toISOString(),
       success: i % 2 === 0,
       duration: i,
       summary: `run-${i}`,
